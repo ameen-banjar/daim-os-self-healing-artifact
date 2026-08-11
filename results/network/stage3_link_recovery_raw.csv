@@ -1,0 +1,21 @@
+packets_sent,packets_received,packet_loss_pct,evidence_level,mode,repetition,failure,recovery_action_us,failure_to_action_us,failure_to_detection_us
+80,72,10.0,measured_emulation_autonomous,autonomous_link,1,s1-s2 link down,151506.875,5373.042,5325.833
+80,73,8.75,measured_emulation_autonomous,autonomous_link,2,s1-s2 link down,150839.345,7395.606,7308.908
+80,73,8.75,measured_emulation_autonomous,autonomous_link,3,s1-s2 link down,146864.06,4899.57,4670.69
+80,73,8.75,measured_emulation_autonomous,autonomous_link,4,s1-s2 link down,146229.871,5082.868,5019.215
+80,73,8.75,measured_emulation_autonomous,autonomous_link,5,s1-s2 link down,147731.527,5493.014,5365.235
+80,73,8.75,measured_emulation_intervention,local_repair,1,s1-s2 link down,148007.293,2348.79,0.0
+80,73,8.75,measured_emulation_intervention,local_repair,2,s1-s2 link down,151133.685,3787.993,0.0
+80,73,8.75,measured_emulation_intervention,local_repair,3,s1-s2 link down,152819.337,2423.779,0.0
+80,73,8.75,measured_emulation_intervention,local_repair,4,s1-s2 link down,147269.203,2217.401,0.0
+80,73,8.75,measured_emulation_intervention,local_repair,5,s1-s2 link down,146418.282,2206.339,0.0
+80,69,13.75,measured_emulation_intervention,central_repair,1,s1-s2 link down,152227.872,102893.017,0.0
+80,69,13.75,measured_emulation_intervention,central_repair,2,s1-s2 link down,148432.934,102137.596,0.0
+80,69,13.75,measured_emulation_intervention,central_repair,3,s1-s2 link down,148648.283,102448.987,0.0
+80,69,13.75,measured_emulation_intervention,central_repair,4,s1-s2 link down,147250.834,103017.682,0.0
+80,68,15.0,measured_emulation_intervention,central_repair,5,s1-s2 link down,148906.27,102458.411,0.0
+80,73,8.75,measured_emulation_intervention,two_loop,1,s1-s2 link down,157258.834,3584.323,0.0
+80,73,8.75,measured_emulation_intervention,two_loop,2,s1-s2 link down,150458.599,2202.014,0.0
+80,73,8.75,measured_emulation_intervention,two_loop,3,s1-s2 link down,148819.418,2456.814,0.0
+80,73,8.75,measured_emulation_intervention,two_loop,4,s1-s2 link down,152441.268,2414.716,0.0
+80,73,8.75,measured_emulation_intervention,two_loop,5,s1-s2 link down,148526.34,2237.527,0.0

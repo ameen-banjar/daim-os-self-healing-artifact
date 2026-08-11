@@ -1,0 +1,6 @@
+packets_sent,packets_received,packet_loss_pct,evidence_level,mode,repetition,failure,failure_to_detection_us,failure_to_repair_start_us,repair_action_us,repaired_path,repair_failed,agent_event_count
+80,73,8.75,measured_emulation_autonomous_agent,autonomous_agent,1,s1-s2 link down,2881.22,2908.761,152731.249,"s1,s3,s4",False,22
+80,72,10.0,measured_emulation_autonomous_agent,autonomous_agent,2,s1-s2 link down,5453.485,5484.401,156544.039,"s1,s3,s4",False,22
+80,72,10.0,measured_emulation_autonomous_agent,autonomous_agent,3,s1-s2 link down,5331.196,5449.736,178069.189,"s1,s3,s4",False,22
+80,73,8.75,measured_emulation_autonomous_agent,autonomous_agent,4,s1-s2 link down,2082.604,2139.603,151756.699,"s1,s3,s4",False,22
+80,74,7.5,measured_emulation_autonomous_agent,autonomous_agent,5,s1-s2 link down,2004.814,2035.481,149235.467,"s1,s3,s4",False,22

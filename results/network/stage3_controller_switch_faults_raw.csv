@@ -1,0 +1,11 @@
+evidence_level,fault,repetition,packets_sent,packets_received,packet_loss_pct,failure_to_action_us,recovery_action_us,action_type
+measured_emulation_fault_injection,controller_failure,1,80,80,0.0,0.0,0.0,data_plane_persistence
+measured_emulation_fault_injection,controller_failure,2,80,80,0.0,0.0,0.0,data_plane_persistence
+measured_emulation_fault_injection,controller_failure,3,80,80,0.0,0.0,0.0,data_plane_persistence
+measured_emulation_fault_injection,controller_failure,4,80,80,0.0,0.0,0.0,data_plane_persistence
+measured_emulation_fault_injection,controller_failure,5,80,80,0.0,0.0,0.0,data_plane_persistence
+measured_emulation_fault_injection,switch_failure,1,80,73,8.75,154136.191,148889.446,alternate_path_reconfiguration
+measured_emulation_fault_injection,switch_failure,2,80,72,10.0,161279.504,155062.334,alternate_path_reconfiguration
+measured_emulation_fault_injection,switch_failure,3,80,72,10.0,164585.702,157228.678,alternate_path_reconfiguration
+measured_emulation_fault_injection,switch_failure,4,80,73,8.75,154806.185,149524.652,alternate_path_reconfiguration
+measured_emulation_fault_injection,switch_failure,5,80,73,8.75,153255.009,148667.845,alternate_path_reconfiguration

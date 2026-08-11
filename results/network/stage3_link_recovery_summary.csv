@@ -1,0 +1,5 @@
+evidence_level,mode,n,mean_packet_loss_pct,mean_failure_to_action_us,mean_recovery_action_us,all_ping_completed
+measured_emulation_autonomous,autonomous_link,5,9.0,5648.82,148634.33560000002,5
+measured_emulation_intervention,central_repair,5,14.0,102591.13859999999,149093.23859999998,5
+measured_emulation_intervention,local_repair,5,8.75,2596.8604,149129.56,5
+measured_emulation_intervention,two_loop,5,8.75,2579.0788000000002,151500.8918,5
