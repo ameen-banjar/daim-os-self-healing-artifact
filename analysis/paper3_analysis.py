@@ -136,7 +136,7 @@ def v_arrow(draw, x, y0, y1, label, font, color="#333333", label_dx=14, width=4)
 # ------------------------------------------------------------- Figure 1 ----
 
 def draw_architecture(path):
-    width, height = 2000, 1500
+    width, height = 2200, 1500
     image = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(image)
     title_font = ImageFont.load_default(size=54)
@@ -150,9 +150,10 @@ def draw_architecture(path):
     hosts = sized_box(draw, 245, 780, "Hosts\nh1 (src), h2 (dst)", font, fill="#EAF2FB", outline="#0072B2")
     agent = two_tier_box(
         draw, 1000, 780, "daim_link_agent.py", "watcher + BFS + hold-down state machine",
-        font, small, fill="#FFF0E6", outline="#D55E00", title_color="#7a3200", sub_color="#8a3b00",
+        font, small, pad_x=55, pad_y=46, fill="#FFF0E6", outline="#D55E00",
+        title_color="#7a3200", sub_color="#8a3b00",
     )
-    switches = sized_box(draw, 1650, 780, "OVS switches\ns1 - s2 - s3 - s4", font, fill="#EAF2FB", outline="#0072B2")
+    switches = sized_box(draw, 1870, 780, "OVS switches\ns1 - s2 - s3 - s4", font, fill="#EAF2FB", outline="#0072B2")
     adapter = sized_box(draw, 1000, 1160, "daim_ovs_flow adapter", font, fill="#FFF0E6", outline="#D55E00")
 
     v_arrow(draw, 1000, ovsdb[3], monitor[1], "", small)
@@ -164,10 +165,14 @@ def draw_architecture(path):
     h_arrow(draw, hosts[2], agent[0], 780, "", small)
     draw.text((hosts[2] + 10, 596), "declared\ntopology graph", fill="#333333", font=small)
 
-    dash_y = agent[1] - 60
-    styled_segment(draw, (agent[2], dash_y), (switches[0], dash_y), "dashed", 3, "#888888")
-    draw.polygon([(switches[0], dash_y), (switches[0] - 16, dash_y - 8), (switches[0] - 16, dash_y + 8)], fill="#888888")
-    draw.text((agent[2] + 20, dash_y - 90), "data plane (not\ntraversed by agent)", fill="#888888", font=small)
+    dash_y = 810
+    gap_mid = (agent[2] + switches[0]) / 2
+    styled_segment(draw, (agent[2] + 15, dash_y), (switches[0] - 15, dash_y), "dashed", 4, "#888888")
+    draw.polygon([(switches[0] - 15, dash_y), (switches[0] - 33, dash_y - 9), (switches[0] - 33, dash_y + 9)], fill="#888888")
+    for li, line in enumerate(("data plane", "(not traversed by agent)")):
+        lb = draw.textbbox((0, 0), line, font=small)
+        lw = lb[2] - lb[0]
+        draw.text((gap_mid - lw / 2, 580 + li * 44), line, fill="#888888", font=small)
 
     v_arrow(draw, 1000, agent[3], adapter[1], "", small)
     draw.text((1030, (agent[3] + adapter[1]) / 2 - 20), "add / delete", fill="#333333", font=small)
