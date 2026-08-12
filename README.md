@@ -57,14 +57,15 @@ uses them.
   performs the actual OVSDB/adapter I/O. Hold-down state is keyed by physical
   edge (the frozenset of the two switches a link connects), not by interface
   name, since v0.3.0 (see below).
-- `network/test_daim_link_agent.py` — four pure-logic unit tests, runnable
+- `network/test_daim_link_agent.py` — six pure-logic unit tests, runnable
   with plain `python3` and no Mininet/OVS/OVSDB: (1) BFS path computation
   against hand-verified expected flow sets; (2) the hold-down state machine
   driven through a synthetic seven-transition flapping-link sequence, with
   and without the hold-down window, confirming it suppresses 4 of 6
   subsequent transitions before any BFS call; (3) a stale-state regression
   test; (4) a cross-interface regression test reproducing the v0.3.0 defect
-  described below.
+  described below; (5)-(6) two edge-confirmation regression tests
+  reproducing the v0.4.0 defect described below.
 - `network/stage3_autonomous_agent.py`, `stage3_link_recovery.py`,
   `stage3_controller_switch_faults.py`, `stage3_holddown_flapping.py` — the
   Mininet/OVS network-level test harnesses that produced the raw data in
@@ -101,6 +102,28 @@ genuine example of a defect that a synthetic, single-interface unit test
 cannot find by construction, and that only surfaced once the same protocol
 was run against a real network. `results/network/STAGE3_HOLDDOWN_FLAPPING_REPORT.md`
 has the full before/after data and event-log evidence.
+
+## A second, deeper defect found by code review (v0.4.0)
+
+Keying hold-down by edge (v0.3.0, above) closed the suppression gap, but the
+fix still recorded a single last-observed-state value *per edge*, overwritten
+by whichever of its two interfaces reported most recently -- a last-report-wins
+policy across two interfaces that report independently, the same fact that
+motivated the v0.3.0 fix in the first place. One interface's `up` could
+recover an edge while the other interface's independently-reported state was
+still `down`. This was found by reviewing the code, not by any test failing.
+`daim_link_agent.py` now tracks a persistent `interface_state` dict keyed by
+interface name and requires *every* interface observing an edge to confirm
+`up` before the edge is treated as recovered
+(`_edge_confirmed_up()`), both at hold-down expiry and in the direct recovery
+path. Two new regression tests reproduce the failing and passing cases.
+The live flapping-link protocol was re-run against the fix (10 further
+repetitions) and reproduced the identical clean pattern with no regression --
+but that re-run does not actually confirm the new invariant, since
+`net.configLinkStatus` changes both interfaces together and has never
+produced the asymmetric timing this fix targets; that remains verified only
+at the logic level pending a live protocol that can desynchronise the two
+interfaces (see `results/network/STAGE3_HOLDDOWN_FLAPPING_REPORT.md`).
 
 ## Reproducing the logic-level results (no network testbed needed)
 

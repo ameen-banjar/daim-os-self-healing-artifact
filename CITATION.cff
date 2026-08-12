@@ -6,10 +6,11 @@ authors:
   - family-names: Banjar
     given-names: Ameen
     orcid: "https://orcid.org/0000-0002-0871-5153"
-version: 0.3.0
+version: 0.4.0
 date-released: 2026-08-12
 license: Apache-2.0
-doi: 10.5281/zenodo.21909633
+# doi: TODO -- fill in the v0.4.0 version-specific DOI once this tag's
+# release is minted by Zenodo. v0.3.0 DOI: 10.5281/zenodo.21909633.
 # v0.1.0 DOI: 10.5281/zenodo.21906993. Concept DOI (always resolves to
 # latest version): 10.5281/zenodo.21906992.
 repository-code: "https://github.com/ameen-banjar/daim-os-self-healing-artifact"
@@ -23,23 +24,25 @@ abstract: >-
   topology graph, installs it through the existing DAIM-OS OVS adapter, and
   suppresses repeated repair processing on a flapping link via an
   IDLE/ACTIVE/HELD-DOWN hold-down state machine, keyed by physical edge
-  rather than interface name since v0.3.0, that also reconciles a held-down
-  edge's true state once its window expires with no further event ever
-  arriving. Two real defects found and fixed via external testing are
-  documented in the history: a stale-state bug (v0.2.0, found via external
-  manuscript review) and a cross-interface hold-down gap (v0.3.0, found by
-  the first live-network run of the flapping-link protocol against a real
-  Mininet/OVS link -- OVSDB reports a link's two interfaces' transitions
-  independently, and the pre-fix hold-down only covered the interface that
-  triggered the repair). Contains pure-logic unit tests for the path
-  computation and all three hold-down behaviours (suppression, stale-state
-  reconciliation, cross-interface coverage), all runnable without
-  Mininet/OVS; a live-network flapping-link script and its five-repetition
-  raw data and event logs (both pre- and post-fix, retained side by side);
-  the network-level Stage 3 raw data (five autonomous link-failure
-  repetitions, plus scripted non-autonomous switch/controller-failure
-  conditions) and reports; and the figure-generation script and resulting
-  figures used in the manuscript.
+  rather than interface name since v0.3.0. An edge is only treated as
+  recovered once every interface observing it independently confirms `up`
+  (v0.4.0) -- a persistent per-interface state, not a single last-report-wins
+  value per edge. Three real defects are documented in the history: a
+  stale-state bug (v0.2.0, found via external manuscript review), a
+  cross-interface hold-down gap (v0.3.0, found by the first live-network run
+  of the flapping-link protocol against a real Mininet/OVS link -- OVSDB
+  reports a link's two interfaces' transitions independently, and the
+  pre-fix hold-down only covered the interface that triggered the repair),
+  and a last-report-wins edge-recovery gap (v0.4.0, found by code review).
+  Contains pure-logic unit tests for the path computation and all four
+  hold-down behaviours (suppression, stale-state reconciliation,
+  cross-interface coverage, edge-confirmation), all runnable without
+  Mininet/OVS; a live-network flapping-link script and its raw data and
+  event logs across the pre-fix, v0.3.0, and v0.4.0 re-verification runs,
+  retained side by side; the network-level Stage 3 raw data (five autonomous
+  link-failure repetitions, plus scripted non-autonomous
+  switch/controller-failure conditions) and reports; and the
+  figure-generation script and resulting figures used in the manuscript.
 keywords:
   - software-defined networking
   - self-healing networks

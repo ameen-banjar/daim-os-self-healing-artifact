@@ -67,6 +67,15 @@ MONITORED_INTERFACES = {
     "s2-eth1": ("s1", "s2"),
 }
 
+# edge -> the set of monitored interface names that observe it. A physical
+# link has two independently-reporting OVS interfaces; an edge is only
+# confirmed recovered once every interface that observes it has reported
+# `up` (see _edge_confirmed_up below).
+EDGE_INTERFACES = {}
+for _name, (_a, _b) in MONITORED_INTERFACES.items():
+    EDGE_INTERFACES.setdefault(frozenset({_a, _b}), set()).add(_name)
+del _name, _a, _b
+
 
 def log(event, **fields):
     record = {"ts": time.time(), "event": event}
@@ -139,7 +148,24 @@ def is_held_down(edge, held_down_until, now):
     return edge in held_down_until and now < held_down_until[edge]
 
 
-def reconcile_expired_holddowns(held_down_until, held_down_last_state, down_edges, now):
+def _edge_confirmed_up(edge, interface_state):
+    """An edge is only considered recovered once *every* monitored interface
+    that observes it has independently reported `up`. A physical link has
+    two independently-reporting OVS interfaces; collapsing them into a
+    single last-report-wins value (an earlier revision of this function did
+    exactly that) means whichever side's `up` happens to arrive last would
+    recover the edge even if the other side is still reporting `down` --
+    losing the specific side's identity is the bug, not just the ordering.
+    An interface that has never reported anything defaults to `up`, since
+    down_edges/interface_state both start empty on the assumption that
+    nothing has failed yet; this only matters once an interface has actually
+    reported `down` and is why single-interface synthetic tests, which never
+    drive the second interface at all, still behave correctly here."""
+    interfaces = EDGE_INTERFACES.get(edge, frozenset())
+    return all(interface_state.get(name, "up") == "up" for name in interfaces)
+
+
+def reconcile_expired_holddowns(held_down_until, interface_state, down_edges, now):
     """Fixes a stale-state bug: a transition suppressed during HELD-DOWN was
     previously dropped with no record, so an edge that went down, was
     repaired, then came back up *during* the hold-down window (a suppressed
@@ -151,25 +177,24 @@ def reconcile_expired_holddowns(held_down_until, held_down_last_state, down_edge
     monitor_link_rows() below accepts a `poll_interval` -- purely to drive
     this reconciliation call, not to poll for failures (detection stays
     100% push-based). Returns the list of edges that were reconciled as
-    recovered (their suppressed last-observed state was "up")."""
+    recovered (every interface observing that edge last reported "up")."""
     recovered = []
     for edge in list(held_down_until):
         if now < held_down_until[edge]:
             continue
-        last_state = held_down_last_state.pop(edge, None)
         del held_down_until[edge]
-        if last_state == "up" and edge in down_edges:
+        if edge in down_edges and _edge_confirmed_up(edge, interface_state):
             down_edges.discard(edge)
             recovered.append(edge)
     return recovered
 
 
 def decide_link_event(name, state, down_edges, held_down_until,
-                       held_down_last_state, current_path, now,
+                       interface_state, current_path, now,
                        hold_down_seconds=HOLD_DOWN_SECONDS):
     """Pure decision function for one OVSDB link-state event on a monitored
     interface: IDLE/ACTIVE/HELD-DOWN state machine plus the existing BFS
-    repair decision. Mutates down_edges/held_down_until/held_down_last_state
+    repair decision. Mutates down_edges/held_down_until/interface_state
     in place (the agent's state); does no I/O and calls no subprocess, so
     this is exercised directly by a synthetic event sequence and a fake
     clock in test_daim_link_agent.py without OVSDB, OVS, or Mininet.
@@ -184,15 +209,27 @@ def decide_link_event(name, state, down_edges, held_down_until,
     leaving the other side's transitions on the *same physical link*
     completely unsuppressed. Keying by edge instead means either side
     reporting a transition is evaluated against the same hold-down window.
+    A second, related defect found by code review (not by testing): an
+    earlier revision recorded only a single last-observed-state value per
+    *edge*, keyed by whichever interface happened to report most recently
+    -- so one side's `up` could recover the edge while the other side's
+    independently-reported state was still `down`. `_edge_confirmed_up()`
+    closes this by tracking state per *interface* and requiring every
+    interface that observes an edge to agree it is `up` before treating the
+    edge as recovered, both here and in `reconcile_expired_holddowns`.
+    `interface_state` is updated with *this* event only after the
+    reconciliation call above has run, so a just-arrived event cannot cause
+    reconcile_expired_holddowns to silently claim the recovery this
+    function's own return value should report.
     Returns a dict describing what the caller (main's I/O loop) should do.
     """
     switch, neighbor = MONITORED_INTERFACES[name]
     edge = frozenset({switch, neighbor})
 
-    reconcile_expired_holddowns(held_down_until, held_down_last_state, down_edges, now)
+    reconcile_expired_holddowns(held_down_until, interface_state, down_edges, now)
+    interface_state[name] = state
 
     if is_held_down(edge, held_down_until, now):
-        held_down_last_state[edge] = state
         return {"action": "suppressed", "interface": name, "state": state,
                 "remaining_s": held_down_until[edge] - now}
 
@@ -208,7 +245,7 @@ def decide_link_event(name, state, down_edges, held_down_until,
         return {"action": "repair", "interface": name, "edge": [switch, neighbor],
                 "old_path": current_path, "new_path": new_path}
 
-    if state == "up" and edge in down_edges:
+    if state == "up" and edge in down_edges and _edge_confirmed_up(edge, interface_state):
         down_edges.discard(edge)
         return {"action": "recovered", "interface": name}
 
@@ -291,7 +328,7 @@ def main():
 
     down_edges = set()
     held_down_until = {}
-    held_down_last_state = {}
+    interface_state = {}
 
     # poll_interval only drives reconcile_expired_holddowns() wake-ups
     # (see that function's docstring); it is well under HOLD_DOWN_SECONDS so
@@ -299,7 +336,7 @@ def main():
     for event in monitor_link_rows(poll_interval=HOLD_DOWN_SECONDS / 4):
         if event is None:
             recovered = reconcile_expired_holddowns(
-                held_down_until, held_down_last_state, down_edges, time.monotonic(),
+                held_down_until, interface_state, down_edges, time.monotonic(),
             )
             for edge in recovered:
                 log("link_up_detected", edge=list(edge), reconciled_after_holddown=True)
@@ -311,7 +348,7 @@ def main():
         detected_ns = time.perf_counter_ns()
         decision = decide_link_event(
             name, state, down_edges, held_down_until,
-            held_down_last_state, current_path, time.monotonic(),
+            interface_state, current_path, time.monotonic(),
         )
         action = decision["action"]
 

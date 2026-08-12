@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pure-logic unit tests for daim_link_agent, independent of Mininet/OVS/OVSDB.
 
-Two things are checked without a live network:
+Six things are checked without a live network:
 1. `test_bfs_path_computation` -- the BFS-computed primary and alternate
    paths produce exactly the flow sets that were previously hand-written in
    stage3_link_recovery.py's install_primary()/install_alternate(), so the
@@ -10,14 +10,27 @@ Two things are checked without a live network:
 2. `test_holddown_suppresses_flapping` -- feeds `decide_link_event` (the
    agent's pure per-event decision function) an identical flapping-link
    event sequence with a synthetic clock, once with the hold-down window
-   enabled and once disabled, and asserts the enabled run installs exactly
-   one repair while the disabled run installs one per down transition. This
-   is a genuine, runnable proof that the hold-down state machine suppresses
-   repeated repair churn on a flapping link -- but it is a logic-level proof
-   over synthetic OVSDB-style events, not a live-network measurement: no
-   Mininet/OVS is available in the environment this test was written in, so
-   real packet loss/timing under a physically flapping link is not measured
-   here (see the manuscript's Limitations section)."""
+   enabled and once disabled, and asserts both install exactly one repair
+   (this agent never reverts to the primary path on recovery, so repeated
+   downs on the same already-excluded edge are no-ops either way) while the
+   enabled run suppresses 4 of 6 subsequent transitions outright, cutting
+   BFS/decision calls from 4 to 2. This is a logic-level proof over
+   synthetic OVSDB-style events with a fake clock; the corresponding
+   live-network measurement against a real Mininet/OVS link is in
+   `stage3_holddown_flapping.py` (Section 6.6/7.3 of the manuscript).
+3. `test_holddown_stale_state_is_reconciled` -- a stale-state regression
+   test (Section 4.7).
+4. `test_holddown_covers_both_interfaces_on_same_edge` -- a cross-interface
+   regression test: hold-down suppresses transitions on either of an edge's
+   two interfaces once either one has triggered a repair (Section 4.7).
+5. `test_edge_recovery_requires_all_interfaces_confirmed_up` -- a
+   last-report-wins regression test found by code review, not by testing:
+   an edge must not be treated as recovered until *every* interface that
+   observes it has independently reported `up`, not just whichever
+   interface's `up` happened to be reported most recently (Section 4.7).
+6. `test_edge_recovers_once_both_interfaces_confirm_up` -- the positive
+   case of the same fix: once every interface has confirmed `up`, the edge
+   is reconciled exactly once, not once per interface."""
 from daim_link_agent import (
     MONITORED_INTERFACES,
     bfs_path,
@@ -85,13 +98,13 @@ EDGE = frozenset({"s1", "s2"})
 
 def run_flap_sequence(hold_down_seconds, interface=INTERFACE):
     down_edges = set()
-    held_down_until, held_down_last_state = {}, {}
+    held_down_until, interface_state = {}, {}
     current_path = ["s1", "s2", "s4"]
     actions = []
     for now, state in FLAP_EVENTS:
         decision = decide_link_event(
             interface, state, down_edges, held_down_until,
-            held_down_last_state, current_path, now, hold_down_seconds=hold_down_seconds,
+            interface_state, current_path, now, hold_down_seconds=hold_down_seconds,
         )
         actions.append(decision["action"])
         if decision["action"] == "repair":
@@ -159,13 +172,13 @@ def test_holddown_stale_state_is_reconciled():
     reconcile_expired_holddowns(), called once the window has passed,
     corrects the state without needing a new OVSDB event."""
     down_edges = set()
-    held_down_until, held_down_last_state = {}, {}
+    held_down_until, interface_state = {}, {}
     current_path = ["s1", "s2", "s4"]
 
     # t=0.0: down -> repair, hold-down window opens until t=2.0.
     d1 = decide_link_event(
         INTERFACE, "down", down_edges, held_down_until,
-        held_down_last_state, current_path, 0.0,
+        interface_state, current_path, 0.0,
     )
     assert d1["action"] == "repair", d1
     current_path = d1["new_path"]
@@ -174,7 +187,7 @@ def test_holddown_stale_state_is_reconciled():
     # t=0.1: up, suppressed -- this is the transition that used to be lost.
     d2 = decide_link_event(
         INTERFACE, "up", down_edges, held_down_until,
-        held_down_last_state, current_path, 0.1,
+        interface_state, current_path, 0.1,
     )
     assert d2["action"] == "suppressed", d2
     # Bug behaviour (pre-fix): down_edges still == {EDGE} forever from here,
@@ -185,7 +198,7 @@ def test_holddown_stale_state_is_reconciled():
     # agent, main()'s poll_interval tick is what calls this after t=2.0;
     # here we call it directly to prove the reconciliation logic itself.
     recovered = reconcile_expired_holddowns(
-        held_down_until, held_down_last_state, down_edges, 2.1,
+        held_down_until, interface_state, down_edges, 2.1,
     )
     assert recovered == [EDGE], recovered
     assert down_edges == set(), (
@@ -193,7 +206,7 @@ def test_holddown_stale_state_is_reconciled():
         f"window expired despite the suppressed transition being 'up': {down_edges}"
     )
     assert EDGE not in held_down_until
-    assert EDGE not in held_down_last_state
+    assert interface_state[INTERFACE] == "up"
 
     print("daim_link_agent hold-down stale-state regression test: PASS -- "
           "a down->up flap fully absorbed inside the hold-down window, with "
@@ -215,13 +228,13 @@ def test_holddown_covers_both_interfaces_on_same_edge():
     edge-keyed fix suppresses transitions on *either* interface once one of
     them has triggered a repair."""
     down_edges = set()
-    held_down_until, held_down_last_state = {}, {}
+    held_down_until, interface_state = {}, {}
     current_path = ["s1", "s2", "s4"]
 
     # s2-eth1 reports down first (as it did in the live run) -> repair.
     d1 = decide_link_event(
         "s2-eth1", "down", down_edges, held_down_until,
-        held_down_last_state, current_path, 0.0,
+        interface_state, current_path, 0.0,
     )
     assert d1["action"] == "repair", d1
     current_path = d1["new_path"]
@@ -234,7 +247,7 @@ def test_holddown_covers_both_interfaces_on_same_edge():
     # interface name is reporting.
     d2 = decide_link_event(
         "s1-eth2", "down", down_edges, held_down_until,
-        held_down_last_state, current_path, 0.05,
+        interface_state, current_path, 0.05,
     )
     assert d2["action"] == "suppressed", (
         f"cross-interface hold-down gap: s1-eth2's transition was not "
@@ -247,7 +260,7 @@ def test_holddown_covers_both_interfaces_on_same_edge():
     # showed pre-fix.
     d3 = decide_link_event(
         "s1-eth2", "up", down_edges, held_down_until,
-        held_down_last_state, current_path, 0.1,
+        interface_state, current_path, 0.1,
     )
     assert d3["action"] == "suppressed", (
         f"cross-interface hold-down gap: s1-eth2's recovery fired "
@@ -260,11 +273,102 @@ def test_holddown_covers_both_interfaces_on_same_edge():
           "edge, matching the fix for the gap the live-network run found.")
 
 
+def test_edge_recovery_requires_all_interfaces_confirmed_up():
+    """Regression test for a defect found by code review, not by testing:
+    an earlier revision recorded a single last-observed-state value per
+    *edge*, overwritten by whichever interface reported most recently. That
+    meant one interface's `up` could recover an edge even while the other
+    interface's independently-reported state was still `down` -- a real gap
+    given the two interfaces genuinely report independently (the same fact
+    that motivated the cross-interface hold-down fix above). This drives
+    exactly that pattern -- s2-eth1 down, s1-eth2 down, s1-eth2 up, then
+    silence from s2-eth1 -- and confirms the edge is NOT reconciled as
+    recovered once the window expires, because s2-eth1's last known state is
+    still `down`."""
+    down_edges = set()
+    held_down_until, interface_state = {}, {}
+    current_path = ["s1", "s2", "s4"]
+
+    d1 = decide_link_event(
+        "s2-eth1", "down", down_edges, held_down_until,
+        interface_state, current_path, 0.0,
+    )
+    assert d1["action"] == "repair", d1
+    current_path = d1["new_path"]
+
+    d2 = decide_link_event(
+        "s1-eth2", "down", down_edges, held_down_until,
+        interface_state, current_path, 0.05,
+    )
+    assert d2["action"] == "suppressed", d2
+
+    d3 = decide_link_event(
+        "s1-eth2", "up", down_edges, held_down_until,
+        interface_state, current_path, 0.1,
+    )
+    assert d3["action"] == "suppressed", d3
+
+    # No further event ever arrives for s2-eth1 -- it is still, as far as
+    # the agent knows, reporting "down".
+    recovered = reconcile_expired_holddowns(
+        held_down_until, interface_state, down_edges, 2.1,
+    )
+    assert recovered == [], (
+        f"last-report-wins bug: edge was reconciled as recovered ({recovered}) "
+        f"even though s2-eth1 never confirmed 'up'"
+    )
+    assert down_edges == {EDGE}, (
+        f"edge should still be down -- only s1-eth2 confirmed up, not "
+        f"s2-eth1: {down_edges}"
+    )
+
+    print("daim_link_agent edge-confirmation regression test (partial "
+          "recovery): PASS -- an edge with one interface confirmed up and "
+          "the other never reporting stays down at hold-down expiry.")
+
+
+def test_edge_recovers_once_both_interfaces_confirm_up():
+    """Positive case of the same fix: once every interface observing an
+    edge has independently reported `up`, the edge is reconciled as
+    recovered exactly once at expiry, not once per interface and not
+    dropped because of which interface reported last."""
+    down_edges = set()
+    held_down_until, interface_state = {}, {}
+    current_path = ["s1", "s2", "s4"]
+
+    d1 = decide_link_event(
+        "s2-eth1", "down", down_edges, held_down_until,
+        interface_state, current_path, 0.0,
+    )
+    assert d1["action"] == "repair", d1
+    current_path = d1["new_path"]
+
+    decide_link_event("s1-eth2", "down", down_edges, held_down_until,
+                       interface_state, current_path, 0.05)
+    decide_link_event("s1-eth2", "up", down_edges, held_down_until,
+                       interface_state, current_path, 0.1)
+    d4 = decide_link_event("s2-eth1", "up", down_edges, held_down_until,
+                            interface_state, current_path, 0.15)
+    assert d4["action"] == "suppressed", d4
+
+    recovered = reconcile_expired_holddowns(
+        held_down_until, interface_state, down_edges, 2.1,
+    )
+    assert recovered == [EDGE], recovered
+    assert down_edges == set(), down_edges
+
+    print("daim_link_agent edge-confirmation regression test (full "
+          "recovery): PASS -- once both s1-eth2 and s2-eth1 confirm 'up', "
+          "the edge is reconciled as recovered exactly once.")
+
+
 def main():
     test_bfs_path_computation()
     test_holddown_suppresses_flapping()
     test_holddown_stale_state_is_reconciled()
     test_holddown_covers_both_interfaces_on_same_edge()
+    test_edge_recovery_requires_all_interfaces_confirmed_up()
+    test_edge_recovers_once_both_interfaces_confirm_up()
 
 
 if __name__ == "__main__":

@@ -107,3 +107,67 @@ behaviour when the two interfaces' OVSDB reports are more asymmetric in
 timing than this VM/loopback environment produced; or any claim about
 production hardware, which may exhibit different propagation delay between
 the two sides of a real physical link than this emulated pair does.
+
+## Second defect and re-verification: edge-confirmation semantics
+
+A code review (not a test failure) found a second, related defect after the
+above fix landed: `reconcile_expired_holddowns` decided whether an edge had
+recovered from a single `held_down_last_state[edge] = state` value,
+overwritten by whichever of the edge's two interfaces reported most
+recently. That is a last-report-wins policy across two independently
+reporting interfaces -- exactly the kind of information loss the
+cross-interface fix above was supposed to close, just one level deeper: an
+edge could be reconciled as recovered because interface A's `up` happened
+to be the last thing recorded, even if interface B's independently-reported
+state was still `down`.
+
+`daim_link_agent.py` was changed to track a persistent `interface_state`
+dict keyed by interface name (not just during hold-down), and a new
+`_edge_confirmed_up()` helper requires every interface observing an edge to
+have last reported `up` before the edge is treated as recovered, both in
+`reconcile_expired_holddowns` and in `decide_link_event`'s direct recovery
+path. `test_daim_link_agent.py` gained two regression tests:
+`test_edge_recovery_requires_all_interfaces_confirmed_up` (an edge with one
+interface confirmed up and the other silent stays down at expiry) and
+`test_edge_recovers_once_both_interfaces_confirm_up` (the positive case,
+exactly one recovery once both confirm). All 6 unit tests pass, including
+the 4 pre-existing ones -- the fix required reordering the reconciliation
+call to run on the *prior* interface state before the current event updates
+it, so a just-arrived event's own recovery is not silently claimed by the
+reconciliation call at the top of the same function invocation.
+
+The live-network flapping-link protocol (`stage3_holddown_flapping.py`) was
+re-run against the updated agent in the same VM, 10 further repetitions
+across two batches. **Every repetition reproduced the identical clean
+pattern already reported above** (`repair` followed by 9 `suppressed`
+transitions and exactly one `recovered`, 31 agent events, 5/5 -- now 10/10
+across both batches -- ending clean), confirming the fix introduces no
+regression in the case already measured. Packet loss varied more between
+these two batches (means 7.3% and 5.8%, individual reps ranging 4.0-14.0%)
+than the original pre/post-fix comparison did (2.8% vs 3.1%); this reflects
+host-machine load during this session, not the code change -- the action
+sequence and event count were identical across all 10 repetitions
+regardless of the loss figure, and neither the original report nor this one
+places statistical weight on packet loss at this sample size. The
+raw data and event log from the second (more recent) batch replace the
+originally-reported post-fix figures as the currently-current measurement,
+consistent with reporting what the current code actually does; the original
+pre-fix (interface-keyed) data remains retained unchanged as
+`stage3_holddown_flapping_raw_pre_edgefix.csv`/`.jsonl`.
+
+**Important limitation this re-run does not close**: this specific
+7-transition schedule brings both `s1-eth2` and `s2-eth1` down/up together
+via Mininet's `net.configLinkStatus`, which changes both interfaces'
+administrative state at effectively the same call. In every repetition
+observed so far, both interfaces have always converged to matching states
+well within the 2 s hold-down window -- so this live protocol has never
+actually exercised the specific asymmetric-confirmation scenario the
+edge-confirmation fix targets (one interface confirmed up, the other still
+down or silent, at the moment the window expires). That scenario is
+currently verified only at the logic level, by the two new unit tests
+above, with a synthetic clock and hand-constructed asymmetric event timing.
+A live-network protocol that can genuinely desynchronise the two interfaces
+-- for example, injecting the down/up commands on each interface
+separately rather than through `configLinkStatus`'s combined call -- is
+required before this specific invariant is confirmed under real OVSDB
+timing rather than only proven correct as a decision-function property.

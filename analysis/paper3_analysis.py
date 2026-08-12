@@ -502,7 +502,7 @@ def draw_live_holddown_comparison(path):
     cols = [
         ("Clean sequences", f"{pre_s['clean']}/{pre_s['n']}", f"{post_s['clean']}/{post_s['n']}", "1 repair, 1 recovered per run"),
         ("Spurious recoveries", f"{pre_s['mean_spurious']:.0f}", f"{post_s['mean_spurious']:.0f}", "mean per repetition"),
-        ("Suppressed transitions", f"{pre_s['mean_suppressed']:.0f}", f"{post_s['mean_suppressed']:.0f}", "mean per repetition"),
+        ("Suppressed reports", f"{pre_s['mean_suppressed']:.0f}", f"{post_s['mean_suppressed']:.0f}", "both interfaces, mean/rep"),
         ("BFS/recompute calls", f"{pre_s['mean_bfs']:.0f}", f"{post_s['mean_bfs']:.0f}", "same units as Figure 5"),
         ("Mean packet loss", f"{pre_s['mean_loss']:.1f}%", f"{post_s['mean_loss']:.1f}%", "200-pkt probe, no stat. weight"),
     ]
