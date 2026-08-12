@@ -6,6 +6,13 @@ helpers). Every number plotted here is read from the real raw CSV or computed
 by actually importing and running the same functions the unit test in
 experiments/network/test_daim_link_agent.py exercises -- nothing here is
 invented to make a nicer-looking chart.
+
+Font sizes here are deliberately large relative to canvas width (compare to
+experiments/analysis/paper1_analysis.py): these figures are inserted at a
+fixed 6.3in width in the submission docx, and a canvas rendered at
+"print resolution" (~300 DPI) with modest font-pixel sizes reads as tiny once
+placed on the page. Every canvas here targets roughly 150-170 effective DPI
+at 6.3in insertion, so figure text prints close to the ~11pt body text size.
 """
 import csv
 import sys
@@ -25,14 +32,12 @@ from test_daim_link_agent import FLAP_EVENTS, run_flap_sequence  # noqa: E402
 
 
 # ---------------------------------------------------------------- helpers --
-# Reused verbatim from paper1_analysis.py so Paper 3's figures share the
-# same visual language as Papers 1 and 2.
 
-def styled_segment(draw, a, b, style="solid", width=4, color="#111111"):
+def styled_segment(draw, a, b, style="solid", width=5, color="#111111"):
     x0, y0 = a
     x1, y1 = b
     length = max(1.0, ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5)
-    pattern = [length] if style == "solid" else [24, 12]
+    pattern = [length] if style == "solid" else [30, 15]
     pos = 0.0
     pi = 0
     on = True
@@ -47,11 +52,21 @@ def styled_segment(draw, a, b, style="solid", width=4, color="#111111"):
         on = not on
 
 
+def text_block_size(draw, text, font):
+    lines = text.split("\n")
+    line_h = font.size + 8
+    widths = []
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        widths.append(bbox[2] - bbox[0])
+    return max(widths), line_h * len(lines)
+
+
 def box(draw, xy, text, font, fill="#F1F1F1", outline="#333333", text_color="#1F2933"):
     x0, y0, x1, y1 = xy
     draw.rectangle(xy, fill=fill, outline=outline, width=3)
     lines = text.split("\n")
-    line_h = font.size + 6
+    line_h = font.size + 8
     total_h = line_h * len(lines)
     ty = y0 + ((y1 - y0) - total_h) / 2
     for line in lines:
@@ -61,92 +76,117 @@ def box(draw, xy, text, font, fill="#F1F1F1", outline="#333333", text_color="#1F
         ty += line_h
 
 
-def h_arrow(draw, x0, x1, y, label, font, color="#333333", dashed=False, label_dy=-26):
+def sized_box(draw, cx, cy, text, font, pad_x=60, pad_y=36, **kwargs):
+    """Box centred at (cx, cy), sized to fit `text` at `font` plus padding.
+    Returns the (x0, y0, x1, y1) box extent actually used."""
+    tw, th = text_block_size(draw, text, font)
+    xy = (cx - tw / 2 - pad_x, cy - th / 2 - pad_y, cx + tw / 2 + pad_x, cy + th / 2 + pad_y)
+    box(draw, xy, text, font, **kwargs)
+    return xy
+
+
+def two_tier_box(draw, cx, cy, title, sub, title_font, sub_font, pad_x=70, pad_y=34, gap=14,
+                  fill="#F1F1F1", outline="#333333", title_color="#1F2933", sub_color="#5B6570"):
+    """Box centred at (cx, cy) with a bold title line (title_font) and a
+    smaller subtitle line (sub_font) stacked below it, each measured and
+    centred independently so the two font sizes never overlap."""
+    tw, th = text_block_size(draw, title, title_font)
+    sw, sh = text_block_size(draw, sub, sub_font)
+    content_w = max(tw, sw)
+    content_h = th + gap + sh
+    xy = (cx - content_w / 2 - pad_x, cy - content_h / 2 - pad_y,
+          cx + content_w / 2 + pad_x, cy + content_h / 2 + pad_y)
+    draw.rectangle(xy, fill=fill, outline=outline, width=3)
+    ty = cy - content_h / 2
+    draw.text((cx - tw / 2, ty), title, fill=title_color, font=title_font)
+    draw.text((cx - sw / 2, ty + th + gap), sub, fill=sub_color, font=sub_font)
+    return xy
+
+
+def h_arrow(draw, x0, x1, y, label, font, color="#333333", dashed=False, label_dy=-34, width=4):
     if dashed:
-        step = 14
+        step = 18
         xx = x0
         while xx < x1 - step:
-            draw.line((xx, y, xx + step * 0.6, y), fill=color, width=2)
+            draw.line((xx, y, xx + step * 0.6, y), fill=color, width=width - 1)
             xx += step
     else:
-        draw.line((x0, y, x1, y), fill=color, width=3)
+        draw.line((x0, y, x1, y), fill=color, width=width)
     direction = 1 if x1 >= x0 else -1
     ax = x1
-    draw.polygon([(ax, y), (ax - 14 * direction, y - 7), (ax - 14 * direction, y + 7)], fill=color)
+    draw.polygon([(ax, y), (ax - 18 * direction, y - 9), (ax - 18 * direction, y + 9)], fill=color)
     if label:
         bbox = draw.textbbox((0, 0), label, font=font)
         tw = bbox[2] - bbox[0]
         tx = min(x0, x1) + abs(x1 - x0) / 2 - tw / 2
         ty = y + label_dy
-        draw.rectangle((tx - 8, ty - 3, tx + tw + 8, ty + font.size + 4), fill="white")
+        draw.rectangle((tx - 10, ty - 4, tx + tw + 10, ty + font.size + 6), fill="white")
         draw.text((tx, ty), label, fill=color, font=font)
 
 
-def v_arrow(draw, x, y0, y1, label, font, color="#333333", label_dx=10):
-    draw.line((x, y0, x, y1), fill=color, width=3)
+def v_arrow(draw, x, y0, y1, label, font, color="#333333", label_dx=14, width=4):
+    draw.line((x, y0, x, y1), fill=color, width=width)
     direction = 1 if y1 >= y0 else -1
     ay = y1
-    draw.polygon([(x, ay), (x - 7, ay - 14 * direction), (x + 7, ay - 14 * direction)], fill=color)
+    draw.polygon([(x, ay), (x - 9, ay - 18 * direction), (x + 9, ay - 18 * direction)], fill=color)
     if label:
-        draw.text((x + label_dx, min(y0, y1) + abs(y1 - y0) / 2 - 10), label, fill=color, font=font)
+        draw.text((x + label_dx, min(y0, y1) + abs(y1 - y0) / 2 - 12), label, fill=color, font=font)
 
 
 # ------------------------------------------------------------- Figure 1 ----
 
 def draw_architecture(path):
-    width, height = 1900, 1150
+    width, height = 2000, 1500
     image = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(image)
-    title_font = ImageFont.load_default(size=42)
-    font = ImageFont.load_default(size=29)
-    small = ImageFont.load_default(size=26)
+    title_font = ImageFont.load_default(size=54)
+    font = ImageFont.load_default(size=42)
+    small = ImageFont.load_default(size=36)
 
-    draw.text((20, 20), "Self-healing DAIM-OS agent: component architecture", fill="#111111", font=title_font)
+    draw.text((24, 24), "Self-healing DAIM-OS agent: component architecture", fill="#111111", font=title_font)
 
-    ovsdb = (790, 110, 1110, 200)
-    monitor = (790, 290, 1110, 380)
-    hosts = (60, 470, 430, 570)
-    agent = (700, 470, 1200, 610)
-    switches = (1500, 470, 1850, 570)
-    adapter = (790, 760, 1110, 870)
+    ovsdb = sized_box(draw, 1000, 200, "ovsdb-server\n(Interface table)", font, fill="#EAF2FB", outline="#0072B2")
+    monitor = sized_box(draw, 1000, 420, "ovsdb-client monitor\n(child process)", font, fill="#EAF2FB", outline="#0072B2")
+    hosts = sized_box(draw, 245, 780, "Hosts\nh1 (src), h2 (dst)", font, fill="#EAF2FB", outline="#0072B2")
+    agent = two_tier_box(
+        draw, 1000, 780, "daim_link_agent.py", "watcher + BFS + hold-down state machine",
+        font, small, fill="#FFF0E6", outline="#D55E00", title_color="#7a3200", sub_color="#8a3b00",
+    )
+    switches = sized_box(draw, 1650, 780, "OVS switches\ns1 - s2 - s3 - s4", font, fill="#EAF2FB", outline="#0072B2")
+    adapter = sized_box(draw, 1000, 1160, "daim_ovs_flow adapter", font, fill="#FFF0E6", outline="#D55E00")
 
-    box(draw, ovsdb, "ovsdb-server\n(Interface table)", font, fill="#EAF2FB", outline="#0072B2")
-    box(draw, monitor, "ovsdb-client monitor\n(child process)", font, fill="#EAF2FB", outline="#0072B2")
-    box(draw, hosts, "Hosts\nh1 (src), h2 (dst)", font, fill="#EAF2FB", outline="#0072B2")
-    box(draw, agent, "daim_link_agent.py", font, fill="#FFF0E6", outline="#D55E00")
-    draw.text((agent[0] + 40, agent[1] + 70), "watcher + BFS + hold-down state machine", fill="#8a3b00", font=small)
-    box(draw, switches, "OVS switches\ns1 - s2 - s3 - s4", font, fill="#EAF2FB", outline="#0072B2")
-    box(draw, adapter, "daim_ovs_flow adapter", font, fill="#FFF0E6", outline="#D55E00")
+    v_arrow(draw, 1000, ovsdb[3], monitor[1], "", small)
+    draw.text((1030, (ovsdb[3] + monitor[1]) / 2 - 20), "push notification (link_state change)", fill="#333333", font=small)
 
-    v_arrow(draw, 950, ovsdb[3], monitor[1], "", small)
-    draw.text((970, 225), "push notification (link_state change)", fill="#333333", font=small)
-    v_arrow(draw, 950, monitor[3], agent[1] - 20, "", small)
-    draw.line((950, agent[1] - 20, 950, agent[1]), fill="#333333", width=3)
-    draw.text((970, 405), "stdout JSON line", fill="#333333", font=small)
+    v_arrow(draw, 1000, monitor[3], agent[1], "", small)
+    draw.text((1030, (monitor[3] + agent[1]) / 2 - 20), "stdout JSON line", fill="#333333", font=small)
 
-    h_arrow(draw, hosts[2], agent[0], 520, "", small)
-    draw.text((450, 480), "declared topology graph", fill="#333333", font=small)
+    h_arrow(draw, hosts[2], agent[0], 780, "", small)
+    draw.text((hosts[2] + 10, 596), "declared\ntopology graph", fill="#333333", font=small)
 
-    styled_segment(draw, (agent[2], 494), (switches[0], 494), "dashed", 3, "#888888")
-    draw.polygon([(switches[0], 494), (switches[0] - 14, 487), (switches[0] - 14, 501)], fill="#888888")
-    draw.text((1240, 420), "data plane (not\ntraversed by agent)", fill="#888888", font=small)
+    dash_y = agent[1] - 60
+    styled_segment(draw, (agent[2], dash_y), (switches[0], dash_y), "dashed", 3, "#888888")
+    draw.polygon([(switches[0], dash_y), (switches[0] - 16, dash_y - 8), (switches[0] - 16, dash_y + 8)], fill="#888888")
+    draw.text((agent[2] + 20, dash_y - 90), "data plane (not\ntraversed by agent)", fill="#888888", font=small)
 
-    v_arrow(draw, 950, agent[3], adapter[1], "", small)
-    draw.text((970, 660), "add / delete", fill="#333333", font=small)
+    v_arrow(draw, 1000, agent[3], adapter[1], "", small)
+    draw.text((1030, (agent[3] + adapter[1]) / 2 - 20), "add / delete", fill="#333333", font=small)
 
-    x_return = 1700
-    draw.line((adapter[2], 815, x_return, 815), fill="#111111", width=4)
-    draw.line((x_return, 815, x_return, 520), fill="#111111", width=4)
-    v_arrow(draw, x_return, 815, switches[3], "", small, color="#111111")
-    draw.text((1720, 650), "OpenFlow\nFlow-Mod", fill="#111111", font=small)
+    adapter_cy = (adapter[1] + adapter[3]) / 2
+    switches_cy = (switches[1] + switches[3]) / 2
+    x_return = switches[2] + 70
+    draw.line((adapter[2], adapter_cy, x_return, adapter_cy), fill="#111111", width=5)
+    draw.line((x_return, adapter_cy, x_return, switches_cy), fill="#111111", width=5)
+    h_arrow(draw, x_return, switches[2], switches_cy, "", small, color="#111111")
+    draw.text((x_return - 200, (adapter_cy + switches_cy) / 2 - 24), "OpenFlow\nFlow-Mod", fill="#111111", font=small)
 
     draw.text(
-        (30, 1010),
-        "Blue: existing OVSDB/OVS/host components. Orange: this paper's new process and its state machine.",
+        (24, 1360),
+        "Blue: existing OVSDB/OVS/host components. Orange: this paper's new\nprocess and its state machine.",
         fill="#333333", font=small,
     )
     draw.text(
-        (30, 1045),
+        (24, 1440),
         "The agent is a single Python process -- watcher, BFS engine, and hold-down state share one event loop.",
         fill="#333333", font=small,
     )
@@ -156,27 +196,28 @@ def draw_architecture(path):
 # ------------------------------------------------------------- Figure 2 ----
 
 def draw_sequence(path):
-    width, height = 1700, 1020
+    width, height = 2000, 1350
     image = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(image)
-    title_font = ImageFont.load_default(size=40)
-    font = ImageFont.load_default(size=27)
-    small = ImageFont.load_default(size=26)
+    title_font = ImageFont.load_default(size=50)
+    font = ImageFont.load_default(size=36)
+    small = ImageFont.load_default(size=33)
 
-    draw.text((20, 20), "Link failure to repaired path: message sequence", fill="#111111", font=title_font)
+    draw.text((24, 24), "Link failure to repaired path: message sequence", fill="#111111", font=title_font)
 
     actors = [
-        ("OVS switch\n(s1-eth2)", 150),
-        ("ovsdb-server", 460),
-        ("ovsdb-client\nmonitor", 780),
-        ("daim_link_agent\n(watcher + BFS)", 1130),
-        ("daim_ovs_flow\nadapter", 1480),
+        ("OVS switch\n(s1-eth2)", 170),
+        ("ovsdb-server", 540),
+        ("ovsdb-client\nmonitor", 920),
+        ("daim_link_agent\n(watcher + BFS)", 1350),
+        ("daim_ovs_flow\nadapter", 1780),
     ]
-    top_y = 110
-    bottom_y = 930
+    top_y = 130
+    bottom_y = 1230
     for name, x in actors:
-        box(draw, (x - 120, top_y, x + 120, top_y + 78), name, font, fill="#EAF2FB", outline="#0072B2")
-        draw.line((x, top_y + 70, x, bottom_y), fill="#BBBBBB", width=2)
+        tw, th = text_block_size(draw, name, font)
+        box(draw, (x - tw / 2 - 26, top_y, x + tw / 2 + 26, top_y + th + 30), name, font, fill="#EAF2FB", outline="#0072B2")
+        draw.line((x, top_y + th + 24, x, bottom_y), fill="#BBBBBB", width=2)
 
     xs = {name: x for name, x in actors}
     steps = [
@@ -189,20 +230,19 @@ def draw_sequence(path):
         ("daim_ovs_flow\nadapter", "OVS switch\n(s1-eth2)", "7  Flow-Mod installs rule", False),
         ("daim_link_agent\n(watcher + BFS)", "daim_link_agent\n(watcher + BFS)", "8  start hold-down window", True),
     ]
-    y = 250
-    step_h = 92
+    y = 310
+    step_h = 118
     for src, dst, label, dashed in steps:
         x0, x1 = xs[src], xs[dst]
         if x0 == x1:
-            # self-transition (agent-internal step): small loop-back arrow.
-            draw.arc((x0 - 40, y - 20, x0 + 40, y + 20), start=300, end=240, fill="#111111", width=3)
-            draw.text((x0 + 50, y - 12), label, fill="#111111", font=small)
+            draw.arc((x0 - 50, y - 26, x0 + 50, y + 26), start=300, end=240, fill="#111111", width=4)
+            draw.text((x0 + 62, y - 16), label, fill="#111111", font=small)
         else:
-            h_arrow(draw, x0, x1, y, label, small, color="#111111", dashed=dashed, label_dy=-20)
+            h_arrow(draw, x0, x1, y, label, small, color="#111111", dashed=dashed, label_dy=-28)
         y += step_h
 
     draw.text(
-        (20, 975),
+        (24, 1275),
         f"Dashed: internal state update, not a message on the wire. Hold-down window = {HOLD_DOWN_SECONDS:.1f}s by default.",
         fill="#555555", font=small,
     )
@@ -212,43 +252,37 @@ def draw_sequence(path):
 # ------------------------------------------------------------- Figure 3 ----
 
 def draw_topology(path):
-    width, height = 1400, 780
+    width, height = 1550, 950
     image = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(image)
-    title_font = ImageFont.load_default(size=38)
-    font = ImageFont.load_default(size=30)
-    small = ImageFont.load_default(size=26)
+    title_font = ImageFont.load_default(size=46)
+    font = ImageFont.load_default(size=38)
+    small = ImageFont.load_default(size=34)
 
-    draw.text((20, 20), "Diamond topology used for all Paper 3 measurements", fill="#111111", font=title_font)
+    draw.text((24, 24), "Diamond topology used for all Paper 3 measurements", fill="#111111", font=title_font)
 
-    h1 = (60, 360, 200, 440)
-    s1 = (330, 360, 470, 440)
-    s2 = (620, 190, 760, 270)
-    s3 = (620, 530, 760, 610)
-    s4 = (910, 360, 1050, 440)
-    h2 = (1180, 360, 1320, 440)
+    cy = 500
+    h1 = sized_box(draw, 110, cy, "h1\n(source)", font, fill="#EAF2FB", outline="#0072B2")
+    s1 = sized_box(draw, 400, cy, "s1", font, fill="#EAF2FB", outline="#0072B2")
+    s2 = sized_box(draw, 775, 260, "s2", font, fill="#FFF0E6", outline="#D55E00")
+    s3 = sized_box(draw, 775, 740, "s3", font, fill="#EAF2FB", outline="#0072B2")
+    s4 = sized_box(draw, 1150, cy, "s4", font, fill="#EAF2FB", outline="#0072B2")
+    h2 = sized_box(draw, 1440, cy, "h2\n(dest)", font, fill="#EAF2FB", outline="#0072B2")
 
-    box(draw, h1, "h1\n(source)", font, fill="#EAF2FB", outline="#0072B2")
-    box(draw, s1, "s1", font, fill="#EAF2FB", outline="#0072B2")
-    box(draw, s2, "s2", font, fill="#FFF0E6", outline="#D55E00")
-    box(draw, s3, "s3", font, fill="#EAF2FB", outline="#0072B2")
-    box(draw, s4, "s4", font, fill="#EAF2FB", outline="#0072B2")
-    box(draw, h2, "h2\n(dest)", font, fill="#EAF2FB", outline="#0072B2")
+    h_arrow(draw, h1[2], s1[0], cy, "", small)
+    h_arrow(draw, s4[2], h2[0], cy, "", small)
 
-    h_arrow(draw, h1[2], s1[0], 400, "", small)
-    h_arrow(draw, s4[2], h2[0], 400, "", small)
+    styled_segment(draw, (s1[2], cy), (s2[0], s2[1] + (s2[3] - s2[1]) / 2), "solid", 6, "#D55E00")
+    styled_segment(draw, (s2[2], s2[1] + (s2[3] - s2[1]) / 2), (s4[0], cy), "solid", 6, "#D55E00")
+    draw.text((360, 100), "primary path (s1-s2-s4)\ninjected failure: s1-eth2 / s2-eth1", fill="#D55E00", font=small)
 
-    styled_segment(draw, (s1[2], 400), (s2[0], 230), "solid", 5, "#D55E00")
-    styled_segment(draw, (s2[2], 230), (s4[0], 400), "solid", 5, "#D55E00")
-    draw.text((430, 100), "primary path (s1-s2-s4)\ninjected failure: s1-eth2 / s2-eth1", fill="#D55E00", font=small)
-
-    styled_segment(draw, (s1[2], 400), (s3[0], 570), "dashed", 4, "#0072B2")
-    styled_segment(draw, (s3[2], 570), (s4[0], 400), "dashed", 4, "#0072B2")
-    draw.text((470, 620), "alternate path (s1-s3-s4), installed after repair", fill="#0072B2", font=small)
+    styled_segment(draw, (s1[2], cy), (s3[0], s3[1] + (s3[3] - s3[1]) / 2), "dashed", 5, "#0072B2")
+    styled_segment(draw, (s3[2], s3[1] + (s3[3] - s3[1]) / 2), (s4[0], cy), "dashed", 5, "#0072B2")
+    draw.text((420, 795), "alternate path (s1-s3-s4), installed after repair", fill="#0072B2", font=small)
 
     draw.text(
-        (20, 710),
-        "4 switches, 5 links. This is the only topology measured for Paper 3 so far (Section on Limitations).",
+        (24, 880),
+        "4 switches, 5 links. This is the only topology measured for Paper 3 so far.",
         fill="#333333", font=small,
     )
     image.save(path)
@@ -268,24 +302,25 @@ def draw_recovery_chart(path):
             })
     rows.sort(key=lambda r: r["rep"])
 
-    width, height = 1600, 920
+    width, height = 1750, 1150
     image = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(image)
-    title_font = ImageFont.load_default(size=36)
-    font = ImageFont.load_default(size=30)
-    small = ImageFont.load_default(size=26)
+    title_font = ImageFont.load_default(size=44)
+    font = ImageFont.load_default(size=38)
+    small = ImageFont.load_default(size=34)
 
-    draw.text((20, 20), "Autonomous link-failure repair: 5 measured repetitions (Stage 3 raw data)", fill="#111111", font=title_font)
-    draw.text((20, 75), "milliseconds", fill="#222222", font=small)
+    draw.text((24, 24), "Autonomous link-failure repair:", fill="#111111", font=title_font)
+    draw.text((24, 76), "5 measured repetitions (Stage 3 raw data)", fill="#111111", font=title_font)
+    draw.text((24, 148), "milliseconds", fill="#222222", font=small)
 
-    left, top, right, bottom = 140, 130, 1540, 720
+    left, top, right, bottom = 170, 200, 1660, 870
     draw.line((left, top, left, bottom), fill="#222222", width=3)
     draw.line((left, bottom, right, bottom), fill="#222222", width=3)
     ymax = 200.0
     for tick in range(0, 201, 25):
         y = bottom - (tick / ymax) * (bottom - top)
-        draw.line((left - 8, y, right, y), fill="#dddddd", width=1)
-        draw.text((60, y - 12), str(tick), fill="#222222", font=small)
+        draw.line((left - 10, y, right, y), fill="#dddddd", width=1)
+        draw.text((70, y - 16), str(tick), fill="#222222", font=small)
 
     n = len(rows)
     group_w = (right - left) / n
@@ -294,24 +329,24 @@ def draw_recovery_chart(path):
         cx = left + group_w * (i + 0.5)
         det_h = (row["detection_ms"] / ymax) * (bottom - top)
         rep_h = (row["repair_ms"] / ymax) * (bottom - top)
-        draw.rectangle((cx - bar_w - 4, bottom - det_h, cx - 4, bottom), fill="#0072B2")
-        draw.rectangle((cx + 4, bottom - rep_h, cx + 4 + bar_w, bottom), fill="#D55E00")
-        draw.text((cx - 14, bottom + 15), f"rep {row['rep']}", fill="#222222", font=small)
-        draw.text((cx - 30, bottom - rep_h - 34), f"{row['repair_ms']:.0f}", fill="#D55E00", font=small)
-        draw.text((cx - bar_w - 34, bottom - det_h - 34), f"{row['detection_ms']:.1f}", fill="#0072B2", font=small)
+        draw.rectangle((cx - bar_w - 5, bottom - det_h, cx - 5, bottom), fill="#0072B2")
+        draw.rectangle((cx + 5, bottom - rep_h, cx + 5 + bar_w, bottom), fill="#D55E00")
+        draw.text((cx - 30, bottom + 18), f"rep {row['rep']}", fill="#222222", font=small)
+        draw.text((cx - 34, bottom - rep_h - 44), f"{row['repair_ms']:.0f}", fill="#D55E00", font=small)
+        draw.text((cx - bar_w - 44, bottom - det_h - 44), f"{row['detection_ms']:.1f}", fill="#0072B2", font=small)
 
-    draw.rectangle((1180, 140, 1200, 160), fill="#0072B2")
-    draw.text((1210, 135), "detection time", fill="#222222", font=small)
-    draw.rectangle((1180, 180, 1200, 200), fill="#D55E00")
-    draw.text((1210, 175), "repair-action time", fill="#222222", font=small)
+    draw.rectangle((1280, 210, 1305, 235), fill="#0072B2")
+    draw.text((1315, 205), "detection time", fill="#222222", font=small)
+    draw.rectangle((1280, 260, 1305, 285), fill="#D55E00")
+    draw.text((1315, 255), "repair-action time", fill="#222222", font=small)
 
     mean_det = sum(r["detection_ms"] for r in rows) / n
     mean_rep = sum(r["repair_ms"] for r in rows) / n
     mean_loss = sum(r["loss_pct"] for r in rows) / n
     draw.text(
-        (140, 790),
-        f"Mean detection {mean_det:.2f} ms, mean repair action {mean_rep:.2f} ms, "
-        f"mean packet loss {mean_loss:.2f}%\n(n=5, single diamond topology, single link failure).",
+        (170, 940),
+        f"Mean detection {mean_det:.2f} ms, mean repair action {mean_rep:.2f} ms,\n"
+        f"mean packet loss {mean_loss:.2f}% (n=5, single diamond topology, single link failure).",
         fill="#333333", font=small,
     )
     image.save(path)
@@ -329,7 +364,7 @@ ACTION_LABEL = {
     "repair": "repair (BFS + flow install)",
     "suppressed": "suppressed (hold-down)",
     "recovered": "recovered (state cleared)",
-    "noop": "no-op (BFS re-run, path unchanged)",
+    "noop": "no-op (BFS re-run,\npath unchanged)",
 }
 
 
@@ -338,58 +373,68 @@ def draw_holddown_timeline(path):
     without_hd = run_flap_sequence(hold_down_seconds=0.0)
     times = [t for t, _ in FLAP_EVENTS]
 
-    width, height = 1500, 820
+    width, height = 1750, 1250
     image = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(image)
-    title_font = ImageFont.load_default(size=36)
-    font = ImageFont.load_default(size=28)
-    small = ImageFont.load_default(size=24)
+    title_font = ImageFont.load_default(size=42)
+    font = ImageFont.load_default(size=36)
+    small = ImageFont.load_default(size=32)
 
     draw.text(
-        (20, 20),
-        "Identical flapping-link event sequence, real output of decide_link_event()",
+        (24, 24),
+        "Identical flapping-link event sequence,",
         fill="#111111", font=title_font,
     )
     draw.text(
-        (20, 65),
-        "(experiments/network/test_daim_link_agent.py::test_holddown_suppresses_flapping)",
+        (24, 74),
+        "real output of decide_link_event()",
+        fill="#111111", font=title_font,
+    )
+    draw.text(
+        (24, 132),
+        "(test_daim_link_agent.py::test_holddown_suppresses_flapping)",
         fill="#666666", font=small,
     )
 
-    left, right = 180, 1440
+    left, right = 220, 1680
     tmax = max(times) + 0.4
 
     def x_of(t):
         return left + (t / tmax) * (right - left)
 
     rows = [
-        ("hold-down disabled (window=0.0s)", without_hd, 280),
-        (f"hold-down enabled (window={HOLD_DOWN_SECONDS:.1f}s)", with_hd, 520),
+        ("hold-down disabled (window=0.0s)", without_hd, 380),
+        (f"hold-down enabled (window={HOLD_DOWN_SECONDS:.1f}s)", with_hd, 660),
     ]
     for label, actions, y in rows:
-        draw.text((20, y - 100), label, fill="#111111", font=font)
+        draw.text((24, y - 130), label, fill="#111111", font=font)
         draw.line((left, y, right, y), fill="#cccccc", width=2)
         prev_x = None
         stagger = 0
         for (t, state), action in zip(FLAP_EVENTS, actions):
             x = x_of(t)
             color = ACTION_COLOR[action]
-            draw.ellipse((x - 12, y - 12, x + 12, y + 12), fill=color, outline="#111111", width=2)
-            stagger = (stagger + 1) if (prev_x is not None and x - prev_x < 45) else 0
-            draw.text((x - 16, y + 22 + stagger * 26), state, fill="#333333", font=small)
+            draw.ellipse((x - 16, y - 16, x + 16, y + 16), fill=color, outline="#111111", width=2)
+            stagger = (stagger + 1) if (prev_x is not None and x - prev_x < 60) else 0
+            draw.text((x - 20, y + 28 + stagger * 34), state, fill="#333333", font=small)
             prev_x = x
 
+    prev_x = None
+    stagger = 0
     for t in times:
         x = x_of(t)
-        draw.line((x, 680, x, 695), fill="#888888", width=2)
-        draw.text((x - 15, 700), f"{t:.1f}s", fill="#333333", font=small)
+        draw.line((x, 860, x, 878), fill="#888888", width=2)
+        stagger = (stagger + 1) if (prev_x is not None and x - prev_x < 70) else 0
+        draw.text((x - 20, 884 + stagger * 38), f"{t:.1f}s", fill="#333333", font=small)
+        prev_x = x
 
-    ly = 760
-    lx = 40
-    for action, color in ACTION_COLOR.items():
-        draw.ellipse((lx, ly, lx + 20, ly + 20), fill=color, outline="#111111", width=2)
-        draw.text((lx + 28, ly - 2), ACTION_LABEL[action], fill="#222222", font=small)
-        lx += 330
+    ly = 1060
+    lx = 24
+    col_w = [420, 400, 460, 460]
+    for (action, color), cw in zip(ACTION_COLOR.items(), col_w):
+        draw.ellipse((lx, ly, lx + 26, ly + 26), fill=color, outline="#111111", width=2)
+        draw.text((lx + 36, ly - 4), ACTION_LABEL[action], fill="#222222", font=small)
+        lx += cw
     image.save(path)
 
 
