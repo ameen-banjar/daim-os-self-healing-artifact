@@ -7,12 +7,9 @@ authors:
     given-names: Ameen
     orcid: "https://orcid.org/0000-0002-0871-5153"
 version: 0.1.0
-date-released: 2026-08-11
+date-released: 2026-08-12
 license: Apache-2.0
-# doi: TODO -- fill in once this repository is pushed to GitHub, the Zenodo
-# GitHub integration is enabled for it, and a GitHub Release/tag is created
-# to trigger Zenodo's automatic archival and DOI minting (same process used
-# for the two artifacts referenced below). Do not fabricate a DOI here.
+doi: "10.5281/zenodo.21906993"
 repository-code: "https://github.com/ameen-banjar/daim-os-self-healing-artifact"
 abstract: >-
   Reproducibility artifact for "Self-Healing DAIM-OS: Event-Driven Fault

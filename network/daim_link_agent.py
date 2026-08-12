@@ -139,20 +139,54 @@ def is_held_down(name, held_down_until, now):
     return name in held_down_until and now < held_down_until[name]
 
 
+def reconcile_expired_holddowns(held_down_until, held_down_last_state, down_edges,
+                                 down_interfaces, now):
+    """Fixes a stale-state bug: a transition suppressed during HELD-DOWN was
+    previously dropped with no record, so an interface that went down, was
+    repaired, then came back up *during* the hold-down window (a suppressed
+    `up`) stayed marked down forever if no further OVSDB event ever arrived
+    for it -- the agent had nothing to trigger re-evaluation on. This
+    function must be called (a) opportunistically, whenever any event for a
+    given interface is processed (decide_link_event does this), and (b) on a
+    bounded timeout even when no event arrives at all, which is why
+    monitor_link_rows() below accepts a `poll_interval` -- purely to drive
+    this reconciliation call, not to poll for failures (detection stays
+    100% push-based). Returns the list of interface names that were
+    reconciled as recovered (their suppressed last-observed state was "up")."""
+    recovered = []
+    for name in list(held_down_until):
+        if now < held_down_until[name]:
+            continue
+        last_state = held_down_last_state.pop(name, None)
+        del held_down_until[name]
+        if last_state == "up" and name in down_interfaces:
+            switch, neighbor = MONITORED_INTERFACES[name]
+            down_interfaces.discard(name)
+            down_edges.discard(frozenset({switch, neighbor}))
+            recovered.append(name)
+    return recovered
+
+
 def decide_link_event(name, state, down_edges, down_interfaces, held_down_until,
-                       current_path, now, hold_down_seconds=HOLD_DOWN_SECONDS):
+                       held_down_last_state, current_path, now,
+                       hold_down_seconds=HOLD_DOWN_SECONDS):
     """Pure decision function for one OVSDB link-state event on a monitored
     interface: IDLE/ACTIVE/HELD-DOWN state machine plus the existing BFS
-    repair decision. Mutates down_edges/down_interfaces/held_down_until in
-    place (the agent's state); does no I/O and calls no subprocess, so this
-    is exercised directly by a synthetic event sequence and a fake clock in
-    test_daim_link_agent.py without OVSDB, OVS, or Mininet.
+    repair decision. Mutates down_edges/down_interfaces/held_down_until/
+    held_down_last_state in place (the agent's state); does no I/O and calls
+    no subprocess, so this is exercised directly by a synthetic event
+    sequence and a fake clock in test_daim_link_agent.py without OVSDB, OVS,
+    or Mininet.
     Returns a dict describing what the caller (main's I/O loop) should do.
     """
+    reconcile_expired_holddowns(held_down_until, held_down_last_state, down_edges,
+                                 down_interfaces, now)
+
     switch, neighbor = MONITORED_INTERFACES[name]
     edge = frozenset({switch, neighbor})
 
     if is_held_down(name, held_down_until, now):
+        held_down_last_state[name] = state
         return {"action": "suppressed", "interface": name, "state": state,
                 "remaining_s": held_down_until[name] - now}
 
@@ -177,36 +211,70 @@ def decide_link_event(name, state, down_edges, down_interfaces, held_down_until,
     return {"action": "ignored", "interface": name, "state": state}
 
 
-def monitor_link_rows():
+def _parse_monitor_line(line):
+    """Parses one ovsdb-client monitor JSON line into a list of (name, state)
+    pairs for 'new' Interface rows. Pure function, split out so it is
+    testable without a subprocess."""
+    line = line.strip()
+    if not line:
+        return []
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        return []
+    headings = payload.get("headings", [])
+    if "action" not in headings or "name" not in headings or "link_state" not in headings:
+        return []
+    action_i = headings.index("action")
+    name_i = headings.index("name")
+    state_i = headings.index("link_state")
+    rows = []
+    for row in payload.get("data", []):
+        if row[action_i] != "new":
+            continue
+        name = row[name_i]
+        state = row[state_i]
+        if name:
+            rows.append((name, state))
+    return rows
+
+
+def monitor_link_rows(poll_interval=None):
     """Yields (name, link_state) for every real 'new' row OVSDB pushes on
-    Interface.link_state, in the order ovsdb-client delivers them."""
+    Interface.link_state, in the order ovsdb-client delivers them.
+
+    If `poll_interval` is given, also yields `None` at least every
+    `poll_interval` seconds when no OVSDB event has arrived. This is *not*
+    failure-detection polling -- a real link-down/up event still arrives
+    immediately via the push subscription below and is yielded the instant
+    it is read. The `None` ticks exist only so main() can call
+    reconcile_expired_holddowns() on a bounded schedule even when an
+    interface's hold-down window expires with no further event ever seen
+    for it (see reconcile_expired_holddowns' docstring for why that case
+    needs a wake-up source at all)."""
     global _monitor_proc
     proc = subprocess.Popen(
         ["ovsdb-client", "monitor", "Interface", "name,link_state", "--format=json"],
         stdout=subprocess.PIPE, text=True, bufsize=1,
     )
     _monitor_proc = proc
-    for line in proc.stdout:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        headings = payload.get("headings", [])
-        if "action" not in headings or "name" not in headings or "link_state" not in headings:
-            continue
-        action_i = headings.index("action")
-        name_i = headings.index("name")
-        state_i = headings.index("link_state")
-        for row in payload.get("data", []):
-            if row[action_i] != "new":
-                continue
-            name = row[name_i]
-            state = row[state_i]
-            if name:
+    if poll_interval is None:
+        for line in proc.stdout:
+            for name, state in _parse_monitor_line(line):
                 yield name, state
+        return
+
+    import select
+    while True:
+        ready, _, _ = select.select([proc.stdout], [], [], poll_interval)
+        if not ready:
+            yield None
+            continue
+        line = proc.stdout.readline()
+        if not line:
+            return
+        for name, state in _parse_monitor_line(line):
+            yield name, state
 
 
 def main():
@@ -220,14 +288,28 @@ def main():
     down_edges = set()
     down_interfaces = set()
     held_down_until = {}
+    held_down_last_state = {}
 
-    for name, state in monitor_link_rows():
+    # poll_interval only drives reconcile_expired_holddowns() wake-ups
+    # (see that function's docstring); it is well under HOLD_DOWN_SECONDS so
+    # an expired window is reconciled promptly even with no further event.
+    for event in monitor_link_rows(poll_interval=HOLD_DOWN_SECONDS / 4):
+        if event is None:
+            recovered = reconcile_expired_holddowns(
+                held_down_until, held_down_last_state, down_edges,
+                down_interfaces, time.monotonic(),
+            )
+            for name in recovered:
+                log("link_up_detected", interface=name, reconciled_after_holddown=True)
+            continue
+
+        name, state = event
         if name not in MONITORED_INTERFACES:
             continue
         detected_ns = time.perf_counter_ns()
         decision = decide_link_event(
             name, state, down_edges, down_interfaces, held_down_until,
-            current_path, time.monotonic(),
+            held_down_last_state, current_path, time.monotonic(),
         )
         action = decision["action"]
 

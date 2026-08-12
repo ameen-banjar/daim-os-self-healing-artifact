@@ -23,6 +23,7 @@ from daim_link_agent import (
     bfs_path,
     decide_link_event,
     path_to_flows,
+    reconcile_expired_holddowns,
     SOURCE,
     DEST,
 )
@@ -80,13 +81,14 @@ INTERFACE = "s1-eth2"
 
 
 def run_flap_sequence(hold_down_seconds):
-    down_edges, down_interfaces, held_down_until = set(), set(), {}
+    down_edges, down_interfaces = set(), set()
+    held_down_until, held_down_last_state = {}, {}
     current_path = ["s1", "s2", "s4"]
     actions = []
     for now, state in FLAP_EVENTS:
         decision = decide_link_event(
             INTERFACE, state, down_edges, down_interfaces, held_down_until,
-            current_path, now, hold_down_seconds=hold_down_seconds,
+            held_down_last_state, current_path, now, hold_down_seconds=hold_down_seconds,
         )
         actions.append(decision["action"])
         if decision["action"] == "repair":
@@ -144,9 +146,63 @@ def test_holddown_suppresses_flapping():
     )
 
 
+def test_holddown_stale_state_is_reconciled():
+    """Regression test for a real correctness bug flagged in editorial
+    review: a down->up sequence where the `up` lands *inside* the hold-down
+    window and no further event ever arrives for that interface. Before the
+    fix, the suppressed `up` was simply dropped -- down_interfaces kept the
+    interface marked down forever, because nothing ever triggered
+    re-evaluation. This test drives exactly that silent case (no third
+    event) and confirms reconcile_expired_holddowns(), called once the
+    window has passed, corrects the state without needing a new OVSDB event."""
+    down_edges, down_interfaces = set(), set()
+    held_down_until, held_down_last_state = {}, {}
+    current_path = ["s1", "s2", "s4"]
+
+    # t=0.0: down -> repair, hold-down window opens until t=2.0.
+    d1 = decide_link_event(
+        INTERFACE, "down", down_edges, down_interfaces, held_down_until,
+        held_down_last_state, current_path, 0.0,
+    )
+    assert d1["action"] == "repair", d1
+    current_path = d1["new_path"]
+    assert down_interfaces == {INTERFACE}, down_interfaces
+
+    # t=0.1: up, suppressed -- this is the transition that used to be lost.
+    d2 = decide_link_event(
+        INTERFACE, "up", down_edges, down_interfaces, held_down_until,
+        held_down_last_state, current_path, 0.1,
+    )
+    assert d2["action"] == "suppressed", d2
+    # Bug behaviour (pre-fix): down_interfaces still == {INTERFACE} forever
+    # from here, since no further event was going to arrive to correct it.
+    assert down_interfaces == {INTERFACE}, "still down during the window, as expected"
+
+    # No further OVSDB event ever arrives for this interface. In the live
+    # agent, main()'s poll_interval tick is what calls this after t=2.0;
+    # here we call it directly to prove the reconciliation logic itself.
+    recovered = reconcile_expired_holddowns(
+        held_down_until, held_down_last_state, down_edges, down_interfaces, 2.1,
+    )
+    assert recovered == [INTERFACE], recovered
+    assert down_interfaces == set(), (
+        "stale-state bug: interface still marked down after its hold-down "
+        f"window expired despite the suppressed transition being 'up': {down_interfaces}"
+    )
+    assert down_edges == set(), down_edges
+    assert INTERFACE not in held_down_until
+    assert INTERFACE not in held_down_last_state
+
+    print("daim_link_agent hold-down stale-state regression test: PASS -- "
+          "a down->up flap fully absorbed inside the hold-down window, with "
+          "no further event ever arriving, is still correctly reconciled "
+          "back to 'up' once the window expires.")
+
+
 def main():
     test_bfs_path_computation()
     test_holddown_suppresses_flapping()
+    test_holddown_stale_state_is_reconciled()
 
 
 if __name__ == "__main__":
