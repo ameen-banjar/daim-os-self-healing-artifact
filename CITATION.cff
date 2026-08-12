@@ -9,10 +9,9 @@ authors:
 version: 0.4.0
 date-released: 2026-08-12
 license: Apache-2.0
-# doi: TODO -- fill in the v0.4.0 version-specific DOI once this tag's
-# release is minted by Zenodo. v0.3.0 DOI: 10.5281/zenodo.21909633.
-# v0.1.0 DOI: 10.5281/zenodo.21906993. Concept DOI (always resolves to
-# latest version): 10.5281/zenodo.21906992.
+doi: 10.5281/zenodo.21910227
+# v0.3.0 DOI: 10.5281/zenodo.21909633. v0.1.0 DOI: 10.5281/zenodo.21906993.
+# Concept DOI (always resolves to latest version): 10.5281/zenodo.21906992.
 repository-code: "https://github.com/ameen-banjar/daim-os-self-healing-artifact"
 abstract: >-
   Reproducibility artifact for "Event-Driven Link-Failure Recovery for a
