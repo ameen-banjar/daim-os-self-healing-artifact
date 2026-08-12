@@ -6,11 +6,11 @@ authors:
   - family-names: Banjar
     given-names: Ameen
     orcid: "https://orcid.org/0000-0002-0871-5153"
-version: 0.2.0
-date-released: 2026-08-13
+version: 0.3.0
+date-released: 2026-08-12
 license: Apache-2.0
 # doi: TODO -- v0.1.0 is 10.5281/zenodo.21906993 (concept DOI
-# 10.5281/zenodo.21906992, always resolves to latest); fill in the v0.2.0
+# 10.5281/zenodo.21906992, always resolves to latest); fill in the v0.3.0
 # version-specific DOI once this tag's release is minted by Zenodo.
 repository-code: "https://github.com/ameen-banjar/daim-os-self-healing-artifact"
 abstract: >-
@@ -21,16 +21,25 @@ abstract: >-
   that subscribes to real OVSDB Interface.link_state notifications,
   recomputes an alternate path with breadth-first search over a declared
   topology graph, installs it through the existing DAIM-OS OVS adapter, and
-  suppresses repeated repair processing on a flapping interface via an
-  IDLE/ACTIVE/HELD-DOWN hold-down state machine that also reconciles an
-  interface's true state once its hold-down window expires with no further
-  event ever arriving for it (a stale-state defect found and fixed in
-  v0.2.0 via external review); pure-logic unit tests for the path
-  computation, the hold-down suppression behaviour, and the stale-state
-  reconciliation fix, all runnable without Mininet/OVS; the network-level
-  Stage 3 raw data (five autonomous link-failure repetitions, plus scripted
-  non-autonomous switch/controller-failure conditions) and reports; and the
-  figure-generation script and resulting figures used in the manuscript.
+  suppresses repeated repair processing on a flapping link via an
+  IDLE/ACTIVE/HELD-DOWN hold-down state machine, keyed by physical edge
+  rather than interface name since v0.3.0, that also reconciles a held-down
+  edge's true state once its window expires with no further event ever
+  arriving. Two real defects found and fixed via external testing are
+  documented in the history: a stale-state bug (v0.2.0, found via external
+  manuscript review) and a cross-interface hold-down gap (v0.3.0, found by
+  the first live-network run of the flapping-link protocol against a real
+  Mininet/OVS link -- OVSDB reports a link's two interfaces' transitions
+  independently, and the pre-fix hold-down only covered the interface that
+  triggered the repair). Contains pure-logic unit tests for the path
+  computation and all three hold-down behaviours (suppression, stale-state
+  reconciliation, cross-interface coverage), all runnable without
+  Mininet/OVS; a live-network flapping-link script and its five-repetition
+  raw data and event logs (both pre- and post-fix, retained side by side);
+  the network-level Stage 3 raw data (five autonomous link-failure
+  repetitions, plus scripted non-autonomous switch/controller-failure
+  conditions) and reports; and the figure-generation script and resulting
+  figures used in the manuscript.
 keywords:
   - software-defined networking
   - self-healing networks

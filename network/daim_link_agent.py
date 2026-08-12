@@ -135,14 +135,13 @@ def withdraw_path(path):
         apply_flow("delete", bridge, match)
 
 
-def is_held_down(name, held_down_until, now):
-    return name in held_down_until and now < held_down_until[name]
+def is_held_down(edge, held_down_until, now):
+    return edge in held_down_until and now < held_down_until[edge]
 
 
-def reconcile_expired_holddowns(held_down_until, held_down_last_state, down_edges,
-                                 down_interfaces, now):
+def reconcile_expired_holddowns(held_down_until, held_down_last_state, down_edges, now):
     """Fixes a stale-state bug: a transition suppressed during HELD-DOWN was
-    previously dropped with no record, so an interface that went down, was
+    previously dropped with no record, so an edge that went down, was
     repaired, then came back up *during* the hold-down window (a suppressed
     `up`) stayed marked down forever if no further OVSDB event ever arrived
     for it -- the agent had nothing to trigger re-evaluation on. This
@@ -151,47 +150,53 @@ def reconcile_expired_holddowns(held_down_until, held_down_last_state, down_edge
     bounded timeout even when no event arrives at all, which is why
     monitor_link_rows() below accepts a `poll_interval` -- purely to drive
     this reconciliation call, not to poll for failures (detection stays
-    100% push-based). Returns the list of interface names that were
-    reconciled as recovered (their suppressed last-observed state was "up")."""
+    100% push-based). Returns the list of edges that were reconciled as
+    recovered (their suppressed last-observed state was "up")."""
     recovered = []
-    for name in list(held_down_until):
-        if now < held_down_until[name]:
+    for edge in list(held_down_until):
+        if now < held_down_until[edge]:
             continue
-        last_state = held_down_last_state.pop(name, None)
-        del held_down_until[name]
-        if last_state == "up" and name in down_interfaces:
-            switch, neighbor = MONITORED_INTERFACES[name]
-            down_interfaces.discard(name)
-            down_edges.discard(frozenset({switch, neighbor}))
-            recovered.append(name)
+        last_state = held_down_last_state.pop(edge, None)
+        del held_down_until[edge]
+        if last_state == "up" and edge in down_edges:
+            down_edges.discard(edge)
+            recovered.append(edge)
     return recovered
 
 
-def decide_link_event(name, state, down_edges, down_interfaces, held_down_until,
+def decide_link_event(name, state, down_edges, held_down_until,
                        held_down_last_state, current_path, now,
                        hold_down_seconds=HOLD_DOWN_SECONDS):
     """Pure decision function for one OVSDB link-state event on a monitored
     interface: IDLE/ACTIVE/HELD-DOWN state machine plus the existing BFS
-    repair decision. Mutates down_edges/down_interfaces/held_down_until/
-    held_down_last_state in place (the agent's state); does no I/O and calls
-    no subprocess, so this is exercised directly by a synthetic event
-    sequence and a fake clock in test_daim_link_agent.py without OVSDB, OVS,
-    or Mininet.
+    repair decision. Mutates down_edges/held_down_until/held_down_last_state
+    in place (the agent's state); does no I/O and calls no subprocess, so
+    this is exercised directly by a synthetic event sequence and a fake
+    clock in test_daim_link_agent.py without OVSDB, OVS, or Mininet.
+
+    Hold-down state is keyed by *edge* (the frozenset of the two switches a
+    link connects), not by interface name. A physical link corresponds to
+    two OVS interfaces -- one per side -- and OVSDB reports their
+    link_state transitions independently and not always simultaneously; a
+    live-network run of the flapping-link protocol (Section 6.6 of the
+    manuscript) found that keying hold-down by interface name only
+    suppressed the side whose `down` event happened to trigger the repair,
+    leaving the other side's transitions on the *same physical link*
+    completely unsuppressed. Keying by edge instead means either side
+    reporting a transition is evaluated against the same hold-down window.
     Returns a dict describing what the caller (main's I/O loop) should do.
     """
-    reconcile_expired_holddowns(held_down_until, held_down_last_state, down_edges,
-                                 down_interfaces, now)
-
     switch, neighbor = MONITORED_INTERFACES[name]
     edge = frozenset({switch, neighbor})
 
-    if is_held_down(name, held_down_until, now):
-        held_down_last_state[name] = state
-        return {"action": "suppressed", "interface": name, "state": state,
-                "remaining_s": held_down_until[name] - now}
+    reconcile_expired_holddowns(held_down_until, held_down_last_state, down_edges, now)
 
-    if state == "down" and name not in down_interfaces:
-        down_interfaces.add(name)
+    if is_held_down(edge, held_down_until, now):
+        held_down_last_state[edge] = state
+        return {"action": "suppressed", "interface": name, "state": state,
+                "remaining_s": held_down_until[edge] - now}
+
+    if state == "down" and edge not in down_edges:
         down_edges.add(edge)
         new_path = bfs_path(SOURCE, DEST, down_edges)
         if not new_path:
@@ -199,12 +204,11 @@ def decide_link_event(name, state, down_edges, down_interfaces, held_down_until,
                      "reason": "no alternate path avoiding down edges"}
         if new_path == current_path:
             return {"action": "noop", "interface": name}
-        held_down_until[name] = now + hold_down_seconds
+        held_down_until[edge] = now + hold_down_seconds
         return {"action": "repair", "interface": name, "edge": [switch, neighbor],
                 "old_path": current_path, "new_path": new_path}
 
-    if state == "up" and name in down_interfaces:
-        down_interfaces.discard(name)
+    if state == "up" and edge in down_edges:
         down_edges.discard(edge)
         return {"action": "recovered", "interface": name}
 
@@ -286,7 +290,6 @@ def main():
     log("agent_started", initial_path=current_path)
 
     down_edges = set()
-    down_interfaces = set()
     held_down_until = {}
     held_down_last_state = {}
 
@@ -296,11 +299,10 @@ def main():
     for event in monitor_link_rows(poll_interval=HOLD_DOWN_SECONDS / 4):
         if event is None:
             recovered = reconcile_expired_holddowns(
-                held_down_until, held_down_last_state, down_edges,
-                down_interfaces, time.monotonic(),
+                held_down_until, held_down_last_state, down_edges, time.monotonic(),
             )
-            for name in recovered:
-                log("link_up_detected", interface=name, reconciled_after_holddown=True)
+            for edge in recovered:
+                log("link_up_detected", edge=list(edge), reconciled_after_holddown=True)
             continue
 
         name, state = event
@@ -308,7 +310,7 @@ def main():
             continue
         detected_ns = time.perf_counter_ns()
         decision = decide_link_event(
-            name, state, down_edges, down_interfaces, held_down_until,
+            name, state, down_edges, held_down_until,
             held_down_last_state, current_path, time.monotonic(),
         )
         action = decision["action"]

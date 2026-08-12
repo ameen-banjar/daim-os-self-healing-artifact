@@ -23,6 +23,8 @@ from PIL import Image, ImageDraw, ImageFont
 ROOT = Path(__file__).resolve().parents[1]
 NETWORK_DIR = ROOT / "network"
 RAW = ROOT / "results/network/stage3_autonomous_agent_raw.csv"
+FLAP_RAW = ROOT / "results/network/stage3_holddown_flapping_raw.csv"
+FLAP_RAW_PRE_FIX = ROOT / "results/network/stage3_holddown_flapping_raw_pre_edgefix.csv"
 OUT = ROOT / "results/paper3"
 OUT.mkdir(parents=True, exist_ok=True)
 
@@ -443,15 +445,101 @@ def draw_holddown_timeline(path):
     image.save(path)
 
 
+# ------------------------------------------------------------- Figure 6 ----
+
+def _read_flap_csv(path):
+    with open(path, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def draw_live_holddown_comparison(path):
+    pre = _read_flap_csv(FLAP_RAW_PRE_FIX)
+    post = _read_flap_csv(FLAP_RAW)
+
+    def stats(rows):
+        losses = [float(r["packet_loss_pct"]) for r in rows]
+        events = [int(r["agent_event_count"]) for r in rows]
+        # "Clean" means exactly one repair AND exactly one recovered for the
+        # whole flap schedule -- the buggy interface-keyed version produced
+        # *multiple* spurious "recovered" events (one per unsuppressed
+        # transition on the interface that was never held down), so a
+        # sequence ending in "recovered" is not by itself enough to tell the
+        # two conditions apart; the repeated middle occurrences are what the
+        # figure needs to surface.
+        clean = sum(
+            1 for r in rows
+            if r["observed_action_sequence"].split(";").count("repair") == 1
+            and r["observed_action_sequence"].split(";").count("recovered") == 1
+        )
+        return {
+            "mean_loss": sum(losses) / len(losses),
+            "mean_events": sum(events) / len(events),
+            "clean": clean,
+            "n": len(rows),
+        }
+
+    pre_s, post_s = stats(pre), stats(post)
+
+    width, height = 1750, 1000
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+    title_font = ImageFont.load_default(size=44)
+    font = ImageFont.load_default(size=38)
+    small = ImageFont.load_default(size=32)
+
+    draw.text((24, 24), "Live-network flapping-link measurement:", fill="#111111", font=title_font)
+    draw.text((24, 76), "before vs after the edge-keyed hold-down fix", fill="#111111", font=title_font)
+    draw.text(
+        (24, 138),
+        "Same 7-transition schedule as Figure 5, driven against a real Mininet/OVS s1-s2 link (n=5 each)",
+        fill="#666666", font=small,
+    )
+
+    cols = [
+        ("Mean packet loss", f"{pre_s['mean_loss']:.1f}%", f"{post_s['mean_loss']:.1f}%", "200-pkt probe"),
+        ("Mean agent events", f"{pre_s['mean_events']:.0f}", f"{post_s['mean_events']:.0f}", "per repetition"),
+        ("Ends clean\n(1 repair, 1 recovered)", f"{pre_s['clean']}/{pre_s['n']}", f"{post_s['clean']}/{post_s['n']}", "repetitions"),
+    ]
+    col_w = 470
+    left0 = 60
+    top = 260
+    row_h = 90
+    header_y = top
+    draw.text((left0 + 340, header_y), "before (buggy)", fill="#D55E00", font=font)
+    draw.text((left0 + 340 + col_w, header_y), "after (fixed)", fill="#0072B2", font=font)
+    y = header_y + 90
+    for label, before_val, after_val, unit in cols:
+        lb = label.split("\n")
+        for li, line in enumerate(lb):
+            draw.text((left0, y + li * 40), line, fill="#222222", font=font)
+        draw.text((left0 + 340, y), before_val, fill="#D55E00", font=title_font)
+        draw.text((left0 + 340 + col_w, y), after_val, fill="#0072B2", font=title_font)
+        draw.text((left0 + 340 + 2 * col_w, y + 8), unit, fill="#888888", font=small)
+        y += row_h + (40 if len(lb) > 1 else 0)
+        draw.line((left0, y - 20, 1650, y - 20), fill="#dddddd", width=2)
+
+    draw.text(
+        (24, 760),
+        "The defect: OVSDB reports each physical link's two interfaces (s1-eth2, s2-eth1) independently.\n"
+        "Hold-down keyed by interface name only suppressed the side that triggered the repair -- the other\n"
+        "side's transitions on the SAME link went through unsuppressed, producing repeated spurious\n"
+        "'recovered' events (0/5 clean before). Keying hold-down by edge instead fixes this (5/5 clean after).",
+        fill="#333333", font=small,
+    )
+    image.save(path)
+
+
 def main():
     draw_architecture(OUT / "paper3_architecture.png")
     draw_sequence(OUT / "paper3_sequence.png")
     draw_topology(OUT / "paper3_topology.png")
     draw_recovery_chart(OUT / "paper3_recovery_timeline.png")
     draw_holddown_timeline(OUT / "paper3_holddown_timeline.png")
+    draw_live_holddown_comparison(OUT / "paper3_holddown_live_comparison.png")
     print("Wrote:")
     for name in ("paper3_architecture.png", "paper3_sequence.png", "paper3_topology.png",
-                 "paper3_recovery_timeline.png", "paper3_holddown_timeline.png"):
+                 "paper3_recovery_timeline.png", "paper3_holddown_timeline.png",
+                 "paper3_holddown_live_comparison.png"):
         print(" ", OUT / name)
 
 
