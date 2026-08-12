@@ -1,31 +1,36 @@
 cff-version: 1.2.0
 message: "If you use this artifact, please cite it and the paper it accompanies once published. This artifact accompanies a prototype-stage manuscript that is not yet submitted (see README.md); cite with that context."
-title: "DAIM-OS Self-Healing Artifact: Event-Driven Fault Detection and Autonomous Path Recovery over the Table-and-Signal Control Path"
+title: "DAIM-OS Self-Healing Artifact: Event-Driven Link-Failure Recovery for a DAIM-OS Client Using OVSDB Notifications and Reactive Path Recomputation"
 type: software
 authors:
   - family-names: Banjar
     given-names: Ameen
     orcid: "https://orcid.org/0000-0002-0871-5153"
-version: 0.1.0
-date-released: 2026-08-12
+version: 0.2.0
+date-released: 2026-08-13
 license: Apache-2.0
-doi: "10.5281/zenodo.21906993"
+# doi: TODO -- v0.1.0 is 10.5281/zenodo.21906993 (concept DOI
+# 10.5281/zenodo.21906992, always resolves to latest); fill in the v0.2.0
+# version-specific DOI once this tag's release is minted by Zenodo.
 repository-code: "https://github.com/ameen-banjar/daim-os-self-healing-artifact"
 abstract: >-
-  Reproducibility artifact for "Self-Healing DAIM-OS: Event-Driven Fault
-  Detection and Autonomous Path Recovery over the Table-and-Signal Control
-  Path" (Paper 3 in the DAIM six-paper programme, prototype-stage, not yet
-  submitted). Contains an event-driven self-healing agent
-  (daim_link_agent.py) that subscribes to real OVSDB Interface.link_state
-  notifications, recomputes an alternate path with breadth-first search over
-  a declared topology graph, installs it through the existing DAIM-OS OVS
-  adapter, and suppresses repeated repair processing on a flapping interface
-  via an IDLE/ACTIVE/HELD-DOWN hold-down state machine; pure-logic unit
-  tests for both the path computation and the hold-down state machine,
-  runnable without Mininet/OVS; the network-level Stage 3 raw data (five
-  autonomous link-failure repetitions, plus scripted non-autonomous
-  switch/controller-failure conditions) and reports; and the figure-
-  generation script and resulting figures used in the manuscript.
+  Reproducibility artifact for "Event-Driven Link-Failure Recovery for a
+  DAIM-OS Client Using OVSDB Notifications and Reactive Path Recomputation"
+  (Paper 3 in the DAIM six-paper programme, prototype-stage, not yet
+  submitted). Contains an event-driven repair agent (daim_link_agent.py)
+  that subscribes to real OVSDB Interface.link_state notifications,
+  recomputes an alternate path with breadth-first search over a declared
+  topology graph, installs it through the existing DAIM-OS OVS adapter, and
+  suppresses repeated repair processing on a flapping interface via an
+  IDLE/ACTIVE/HELD-DOWN hold-down state machine that also reconciles an
+  interface's true state once its hold-down window expires with no further
+  event ever arriving for it (a stale-state defect found and fixed in
+  v0.2.0 via external review); pure-logic unit tests for the path
+  computation, the hold-down suppression behaviour, and the stale-state
+  reconciliation fix, all runnable without Mininet/OVS; the network-level
+  Stage 3 raw data (five autonomous link-failure repetitions, plus scripted
+  non-autonomous switch/controller-failure conditions) and reports; and the
+  figure-generation script and resulting figures used in the manuscript.
 keywords:
   - software-defined networking
   - self-healing networks

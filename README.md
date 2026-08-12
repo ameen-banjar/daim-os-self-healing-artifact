@@ -2,9 +2,12 @@
 
 Reproducibility artifact for the paper:
 
-**"Self-Healing DAIM-OS: Event-Driven Fault Detection and Autonomous Path
-Recovery over the Table-and-Signal Control Path"** — Ameen Banjar (2026).
-Paper 3 in the DAIM six-paper programme.
+**"Event-Driven Link-Failure Recovery for a DAIM-OS Client Using OVSDB
+Notifications and Reactive Path Recomputation"** — Ameen Banjar (2026).
+Paper 3 in the DAIM six-paper programme. (Retitled from an earlier, broader
+"Self-Healing DAIM-OS" framing after external review noted the agent does
+not read or write DAIM-OS core tables/signals directly — see the
+manuscript's Section 4.1 for the actual DAIM-OS integration boundary.)
 
 **Status: this artifact accompanies a prototype-stage, not-yet-submitted
 manuscript.** Per the author's plan, submission of Paper 3 is held until
