@@ -458,29 +458,33 @@ def draw_live_holddown_comparison(path):
 
     def stats(rows):
         losses = [float(r["packet_loss_pct"]) for r in rows]
-        events = [int(r["agent_event_count"]) for r in rows]
         # "Clean" means exactly one repair AND exactly one recovered for the
         # whole flap schedule -- the buggy interface-keyed version produced
         # *multiple* spurious "recovered" events (one per unsuppressed
         # transition on the interface that was never held down), so a
         # sequence ending in "recovered" is not by itself enough to tell the
         # two conditions apart; the repeated middle occurrences are what the
-        # figure needs to surface.
-        clean = sum(
-            1 for r in rows
-            if r["observed_action_sequence"].split(";").count("repair") == 1
-            and r["observed_action_sequence"].split(";").count("recovered") == 1
-        )
+        # figure needs to surface. "BFS/recomputation calls" mirrors the
+        # count reported for the logic-level test in Figure 5 (repair + noop
+        # + recovered actions, i.e. every action that is not "suppressed"),
+        # so the two figures use directly comparable units.
+        seqs = [r["observed_action_sequence"].split(";") for r in rows]
+        clean = sum(1 for s in seqs if s.count("repair") == 1 and s.count("recovered") == 1)
+        spurious_recovered = [s.count("recovered") - 1 for s in seqs]
+        suppressed = [s.count("suppressed") for s in seqs]
+        bfs_calls = [len(s) - s.count("suppressed") for s in seqs]
         return {
             "mean_loss": sum(losses) / len(losses),
-            "mean_events": sum(events) / len(events),
             "clean": clean,
             "n": len(rows),
+            "mean_spurious": sum(spurious_recovered) / len(spurious_recovered),
+            "mean_suppressed": sum(suppressed) / len(suppressed),
+            "mean_bfs": sum(bfs_calls) / len(bfs_calls),
         }
 
     pre_s, post_s = stats(pre), stats(post)
 
-    width, height = 1750, 1000
+    width, height = 1750, 1180
     image = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(image)
     title_font = ImageFont.load_default(size=44)
@@ -496,34 +500,37 @@ def draw_live_holddown_comparison(path):
     )
 
     cols = [
-        ("Mean packet loss", f"{pre_s['mean_loss']:.1f}%", f"{post_s['mean_loss']:.1f}%", "200-pkt probe"),
-        ("Mean agent events", f"{pre_s['mean_events']:.0f}", f"{post_s['mean_events']:.0f}", "per repetition"),
-        ("Ends clean\n(1 repair, 1 recovered)", f"{pre_s['clean']}/{pre_s['n']}", f"{post_s['clean']}/{post_s['n']}", "repetitions"),
+        ("Clean sequences", f"{pre_s['clean']}/{pre_s['n']}", f"{post_s['clean']}/{post_s['n']}", "1 repair, 1 recovered per run"),
+        ("Spurious recoveries", f"{pre_s['mean_spurious']:.0f}", f"{post_s['mean_spurious']:.0f}", "mean per repetition"),
+        ("Suppressed transitions", f"{pre_s['mean_suppressed']:.0f}", f"{post_s['mean_suppressed']:.0f}", "mean per repetition"),
+        ("BFS/recompute calls", f"{pre_s['mean_bfs']:.0f}", f"{post_s['mean_bfs']:.0f}", "same units as Figure 5"),
+        ("Mean packet loss", f"{pre_s['mean_loss']:.1f}%", f"{post_s['mean_loss']:.1f}%", "200-pkt probe, no stat. weight"),
     ]
-    col_w = 470
+    label_w = max(draw.textlength(label, font=font) for label, *_ in cols)
+    val_col0 = 60 + int(label_w) + 60
+    col_w = 400
     left0 = 60
     top = 260
     row_h = 90
     header_y = top
-    draw.text((left0 + 340, header_y), "before (buggy)", fill="#D55E00", font=font)
-    draw.text((left0 + 340 + col_w, header_y), "after (fixed)", fill="#0072B2", font=font)
+    draw.text((val_col0, header_y), "before (buggy)", fill="#D55E00", font=font)
+    draw.text((val_col0 + col_w, header_y), "after (fixed)", fill="#0072B2", font=font)
     y = header_y + 90
     for label, before_val, after_val, unit in cols:
-        lb = label.split("\n")
-        for li, line in enumerate(lb):
-            draw.text((left0, y + li * 40), line, fill="#222222", font=font)
-        draw.text((left0 + 340, y), before_val, fill="#D55E00", font=title_font)
-        draw.text((left0 + 340 + col_w, y), after_val, fill="#0072B2", font=title_font)
-        draw.text((left0 + 340 + 2 * col_w, y + 8), unit, fill="#888888", font=small)
-        y += row_h + (40 if len(lb) > 1 else 0)
+        draw.text((left0, y), label, fill="#222222", font=font)
+        draw.text((val_col0, y), before_val, fill="#D55E00", font=title_font)
+        draw.text((val_col0 + col_w, y), after_val, fill="#0072B2", font=title_font)
+        draw.text((val_col0 + 2 * col_w, y + 8), unit, fill="#888888", font=small)
+        y += row_h
         draw.line((left0, y - 20, 1650, y - 20), fill="#dddddd", width=2)
 
     draw.text(
-        (24, 760),
+        (24, y + 30),
         "The defect: OVSDB reports each physical link's two interfaces (s1-eth2, s2-eth1) independently.\n"
         "Hold-down keyed by interface name only suppressed the side that triggered the repair -- the other\n"
-        "side's transitions on the SAME link went through unsuppressed, producing repeated spurious\n"
-        "'recovered' events (0/5 clean before). Keying hold-down by edge instead fixes this (5/5 clean after).",
+        "side's transitions on the SAME link went through unsuppressed, each logged as its own spurious\n"
+        "'recovered' event. Keying hold-down by edge instead fixes this. The actual flow repair is 1 either\n"
+        "way -- what changes is how many of the link's reported transitions are correctly suppressed.",
         fill="#333333", font=small,
     )
     image.save(path)
