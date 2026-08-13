@@ -545,19 +545,16 @@ def draw_startup_comparison(path):
     pre = json.loads(STARTUP_RESULT_PRE_FIX.read_text())
     post = json.loads(STARTUP_RESULT.read_text())
 
-    def loss_pct(result):
-        tail = result["ping_output_tail"]
-        for line in tail.splitlines():
-            if "packet loss" in line:
-                # e.g. "20 packets transmitted, 20 received, 0% packet loss, ..."
-                for part in line.split(","):
-                    part = part.strip()
-                    if part.endswith("% packet loss"):
-                        return part.replace("% packet loss", "")
-        return "?"
+    # ping_loss_pct is parsed once, numerically, by
+    # stage3_startup_already_down.py::parse_ping_loss_pct() and stored
+    # directly in the result JSON -- read it from there rather than
+    # re-parsing ping_output_tail a second time here.
+    def loss_str(result):
+        pct = result.get("ping_loss_pct")
+        return "?" if pct is None else f"{pct:g}"
 
-    pre_loss = loss_pct(pre)
-    post_loss = loss_pct(post)
+    pre_loss = loss_str(pre)
+    post_loss = loss_str(post)
     pre_path = " -> ".join(pre["initial_path"]) if pre["initial_path"] else "?"
     post_path = " -> ".join(post["initial_path"]) if post["initial_path"] else "?"
 

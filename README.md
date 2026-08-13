@@ -57,7 +57,7 @@ uses them.
   performs the actual OVSDB/adapter I/O. Hold-down state is keyed by physical
   edge (the frozenset of the two switches a link connects), not by interface
   name, since v0.3.0 (see below).
-- `network/test_daim_link_agent.py` — nine pure-logic unit tests, runnable
+- `network/test_daim_link_agent.py` — ten pure-logic unit tests, runnable
   with plain `python3` and no Mininet/OVS/OVSDB: (1) BFS path computation
   against hand-verified expected flow sets; (2) the hold-down state machine
   driven through a synthetic seven-transition flapping-link sequence, with
@@ -67,7 +67,13 @@ uses them.
   described below; (5)-(6) two edge-confirmation regression tests
   reproducing the v0.4.0 defect described below; (7)-(9) three
   startup-synchronization regression tests reproducing the v0.5.0 defect
-  described below.
+  described below; (10) a robustness test confirming an unrecognised
+  `link_state` value is rejected rather than silently treated as "up"
+  (v0.6.0).
+- `network/test_stage3_startup_already_down.py` — a regression test for a
+  bug in the startup live-network harness itself (v0.6.0, see below), kept
+  separate from `test_daim_link_agent.py` since it tests the harness, not
+  the agent.
 - `network/stage3_autonomous_agent.py`, `stage3_link_recovery.py`,
   `stage3_controller_switch_faults.py`, `stage3_holddown_flapping.py`,
   `stage3_startup_already_down.py` — the Mininet/OVS network-level test
@@ -156,6 +162,36 @@ and installed the correct alternate path directly: **0% packet loss** from
 the first probe packet. Both raw JSON results are retained side by side in
 `results/network/`; the full writeup is
 `results/network/STAGE3_STARTUP_ALREADY_DOWN_REPORT.md`.
+
+## Robustness hardening and a harness bug fix (v0.6.0)
+
+Two further review passes over the v0.5.0 fix, before moving on to larger
+experiments:
+
+- **`link_state` validation.** `down_edges_from_snapshot()` originally
+  treated anything other than `"down"` as implicitly `"up"`. OVS documents
+  `Interface.link_state` as optional, so an empty string or unexpected
+  value is possible in principle even if not observed in this environment.
+  It now requires exactly `"up"` or `"down"`, raising otherwise, with its
+  own regression test. `main()` was also wrapped so a fatal startup path
+  (missing interface, no viable path, or a rejected `link_state`) still
+  terminates the monitor subprocess rather than leaking it.
+- **A bug in the startup-scenario test harness itself.**
+  `stage3_startup_already_down.py`'s original `ping_had_loss` field used
+  `"0% packet loss" not in ping_output`, a substring check -- and `"100%
+  packet loss"` contains `"0% packet loss"` as a substring (the trailing
+  `"0%"` of `"100%"`), so the 100%-loss pre-fix run was silently recorded
+  as `ping_had_loss: false` in the stored JSON. The script's overall
+  `correct` verdict was unaffected (it never used that field, and already
+  failed the pre-fix run for the right reasons), and neither was Figure 7,
+  which parses the loss percentage independently -- but the field itself
+  was wrong until fixed. Replaced with a proper `parse_ping_loss_pct()`
+  function, with its own regression test reproducing the exact string that
+  triggered the bug (`test_stage3_startup_already_down.py`), and `correct`
+  now also explicitly requires `ping_loss_pct == 0.0` for the fixed-agent
+  run. The startup-already-down scenario was also re-run three times
+  against the fixed agent as a robustness check (all three: `CORRECT`, 0%
+  loss).
 
 ## Reproducing the logic-level results (no network testbed needed)
 

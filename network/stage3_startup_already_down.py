@@ -20,31 +20,34 @@ import sys
 import time
 from pathlib import Path
 
-from mininet.link import TCLink
-from mininet.log import setLogLevel
-from mininet.net import Mininet
-from mininet.node import OVSSwitch
-from mininet.topo import Topo
+# Mininet is imported lazily, inside main(), rather than at module level:
+# this keeps parse_ping_loss_pct() (and any other pure logic added later)
+# importable and testable on a host without Mininet/OVS installed, matching
+# the pure-logic/live-I-O separation used throughout daim_link_agent.py.
 
 ROOT = Path(__file__).resolve().parents[1]
 AGENT = ROOT / "network/daim_link_agent.py"
 RESULT = ROOT / "results/network/stage3_startup_already_down_result.json"
 
 
-class DiamondTopo(Topo):
-    def build(self):
-        s1, s2, s3, s4 = [
-            self.addSwitch(f"s{i}", protocols="OpenFlow13", failMode="secure")
-            for i in range(1, 5)
-        ]
-        h1 = self.addHost("h1", ip="10.0.0.1/24")
-        h2 = self.addHost("h2", ip="10.0.0.2/24")
-        self.addLink(h1, s1)
-        self.addLink(s1, s2)
-        self.addLink(s2, s4)
-        self.addLink(s1, s3)
-        self.addLink(s3, s4)
-        self.addLink(s4, h2)
+def parse_ping_loss_pct(ping_output):
+    """Extracts the numeric packet-loss percentage from a `ping` command's
+    output, e.g. "100% packet loss" -> 100.0. Pulled out as its own function
+    after a real bug was found in an earlier revision of this script: it
+    checked `"0% packet loss" not in ping_output` to decide whether there
+    was loss, which is a substring match -- "100% packet loss" itself
+    contains "0% packet loss" as a substring (the trailing "0%" of "100%"),
+    so a 100%-loss run was incorrectly reported as loss-free. This parses
+    the actual numeric value instead of substring-matching a fixed string."""
+    for line in ping_output.splitlines():
+        for part in line.split(","):
+            part = part.strip()
+            if part.endswith("% packet loss"):
+                try:
+                    return float(part[: -len("% packet loss")])
+                except ValueError:
+                    pass
+    return None
 
 
 def read_agent_events(agent, deadline, events, stop_event_name=None):
@@ -70,6 +73,27 @@ def read_agent_events(agent, deadline, events, stop_event_name=None):
 
 
 def main():
+    from mininet.link import TCLink
+    from mininet.log import setLogLevel
+    from mininet.net import Mininet
+    from mininet.node import OVSSwitch
+    from mininet.topo import Topo
+
+    class DiamondTopo(Topo):
+        def build(self):
+            s1, s2, s3, s4 = [
+                self.addSwitch(f"s{i}", protocols="OpenFlow13", failMode="secure")
+                for i in range(1, 5)
+            ]
+            h1 = self.addHost("h1", ip="10.0.0.1/24")
+            h2 = self.addHost("h2", ip="10.0.0.2/24")
+            self.addLink(h1, s1)
+            self.addLink(s1, s2)
+            self.addLink(s2, s4)
+            self.addLink(s1, s3)
+            self.addLink(s3, s4)
+            self.addLink(s4, h2)
+
     setLogLevel("warning")
     subprocess.run(["mn", "-c"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     net = Mininet(topo=DiamondTopo(), controller=None, switch=OVSSwitch, link=TCLink, autoSetMacs=True)
@@ -102,7 +126,8 @@ def main():
         h1, h2 = net.get("h1", "h2")
         ping = h1.cmd("ping -c 20 -i 0.05 -W 1 10.0.0.2")
         result["ping_output_tail"] = ping[-300:]
-        result["ping_had_loss"] = "0% packet loss" not in ping
+        result["ping_loss_pct"] = parse_ping_loss_pct(ping)
+        result["ping_had_loss"] = result["ping_loss_pct"] != 0.0
 
         down_edges_as_sets = [set(e) for e in (result["down_edges_at_startup"] or [])]
         result["correct"] = (
@@ -110,6 +135,7 @@ def main():
             and result["initial_path"] == ["s1", "s3", "s4"]
             and down_edges_as_sets == [{"s1", "s2"}]
             and not result["fatal_events"]
+            and result["ping_loss_pct"] == 0.0
         )
     finally:
         if agent and agent.poll() is None:

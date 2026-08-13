@@ -374,10 +374,25 @@ def down_edges_from_snapshot(snapshot):
     """Derives the set of down edges implied by an initial (or any other)
     {interface_name: link_state} snapshot -- pulled out of main() as its own
     pure function so the startup-state-detection logic is exercised
-    identically by main() and by test_startup_detects_already_down_edge()."""
+    identically by main() and by test_startup_detects_already_down_edge().
+
+    Requires every monitored interface's reported state to be exactly "up"
+    or "down"; any other value (OVS documents Interface.link_state as
+    optional, and it can in principle be empty for a non-applicable port)
+    is treated as fatal rather than silently falling through to "not down",
+    which would otherwise be indistinguishable from a genuinely healthy
+    link at startup -- the same kind of implicit-default gap the startup
+    snapshot fix itself was written to close."""
     down_edges = set()
     for name, state in snapshot.items():
-        if state == "down" and name in MONITORED_INTERFACES:
+        if name not in MONITORED_INTERFACES:
+            continue
+        if state not in ("up", "down"):
+            raise RuntimeError(
+                f"unexpected initial link_state {state!r} for monitored interface "
+                f"{name!r}: expected exactly 'up' or 'down'"
+            )
+        if state == "down":
             switch, neighbor = MONITORED_INTERFACES[name]
             down_edges.add(frozenset({switch, neighbor}))
     return down_edges
@@ -385,24 +400,40 @@ def down_edges_from_snapshot(snapshot):
 
 def main():
     proc = _start_monitor()
-    initial = read_initial_snapshot(proc)
-    missing = [name for name in MONITORED_INTERFACES if name not in initial]
-    if missing:
-        log("fatal", reason="missing initial OVSDB state for monitored interface(s)",
-            interfaces=missing)
-        sys.exit(1)
+    # Every exit from this block -- a normal sys.exit(1) on a fatal startup
+    # condition, or an unexpected exception such as down_edges_from_snapshot's
+    # RuntimeError on an unrecognised link_state value -- must still
+    # terminate the monitor child; without this, a fatal startup path leaked
+    # an orphaned `ovsdb-client monitor` exactly like the case the
+    # SIGTERM/SIGINT handler above already guards against, just reached a
+    # different way (an in-process exit rather than a signal).
+    try:
+        initial = read_initial_snapshot(proc)
+        missing = [name for name in MONITORED_INTERFACES if name not in initial]
+        if missing:
+            log("fatal", reason="missing initial OVSDB state for monitored interface(s)",
+                interfaces=missing)
+            sys.exit(1)
 
-    interface_state = dict(initial)
-    down_edges = down_edges_from_snapshot(initial)
+        interface_state = dict(initial)
+        down_edges = down_edges_from_snapshot(initial)
 
-    current_path = bfs_path(SOURCE, DEST, down_edges)
-    if not current_path:
-        log("fatal", reason="no initial path avoiding edges already down at startup",
+        current_path = bfs_path(SOURCE, DEST, down_edges)
+        if not current_path:
+            log("fatal", reason="no initial path avoiding edges already down at startup",
+                down_edges=[list(edge) for edge in down_edges])
+            sys.exit(1)
+        install_path(current_path)
+        log("agent_started", initial_path=current_path,
             down_edges=[list(edge) for edge in down_edges])
-        sys.exit(1)
-    install_path(current_path)
-    log("agent_started", initial_path=current_path,
-        down_edges=[list(edge) for edge in down_edges])
+    except BaseException:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        raise
 
     held_down_until = {}
 

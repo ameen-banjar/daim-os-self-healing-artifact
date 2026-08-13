@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pure-logic unit tests for daim_link_agent, independent of Mininet/OVS/OVSDB.
 
-Nine things are checked without a live network:
+Ten things are checked without a live network:
 1. `test_bfs_path_computation` -- the BFS-computed primary and alternate
    paths produce exactly the flow sets that were previously hand-written in
    stage3_link_recovery.py's install_primary()/install_alternate(), so the
@@ -42,7 +42,10 @@ Nine things are checked without a live network:
    select()/readline() code path main() uses.
 9. `test_startup_detects_already_down_edge` -- the other half of the same
    fix: an edge already down at startup must be excluded from the initial
-   path computation, not silently assumed up."""
+   path computation, not silently assumed up.
+10. `test_startup_rejects_unexpected_link_state` -- a robustness check found
+    by review: an unrecognised `link_state` value must be rejected, not
+    silently treated as "up"."""
 import json
 import os
 
@@ -486,6 +489,30 @@ def test_startup_detects_already_down_edge():
           "path computation, instead of being silently assumed up.")
 
 
+def test_startup_rejects_unexpected_link_state():
+    """Robustness regression test: down_edges_from_snapshot() must not
+    silently treat an unrecognised link_state value (OVS documents
+    Interface.link_state as optional, so an empty string is possible for a
+    non-applicable port) as equivalent to "up". Found by review, not by any
+    live failure -- this scenario has not been observed against real OVS in
+    this environment, but the fix is cheap and the alternative (silently
+    assuming a link is fine) is exactly the class of bug the startup fix
+    itself exists to close."""
+    for bad_state in ("", "unknown", "up "):
+        try:
+            down_edges_from_snapshot({"s1-eth2": bad_state, "s2-eth1": "up"})
+        except RuntimeError:
+            continue
+        raise AssertionError(
+            f"down_edges_from_snapshot silently accepted link_state={bad_state!r} "
+            f"instead of raising"
+        )
+
+    print("daim_link_agent unexpected-link_state regression test: PASS -- "
+          "down_edges_from_snapshot rejects any link_state that isn't "
+          "exactly 'up' or 'down' instead of silently treating it as up.")
+
+
 def main():
     test_bfs_path_computation()
     test_holddown_suppresses_flapping()
@@ -496,6 +523,7 @@ def main():
     test_parse_monitor_line_initial_vs_new()
     test_read_initial_snapshot_reflects_already_down_interface()
     test_startup_detects_already_down_edge()
+    test_startup_rejects_unexpected_link_state()
 
 
 if __name__ == "__main__":

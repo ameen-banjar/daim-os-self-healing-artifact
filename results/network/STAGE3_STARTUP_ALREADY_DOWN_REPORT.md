@@ -49,12 +49,41 @@ the agent's belief that the network was fully up.
   only *then* computes and installs the agent's first path -- instead of
   always starting from an assumed-clean `down_edges = set()`.
 
-Three new regression tests (`test_parse_monitor_line_initial_vs_new`,
+Four new regression tests (`test_parse_monitor_line_initial_vs_new`,
 `test_read_initial_snapshot_reflects_already_down_interface`,
-`test_startup_detects_already_down_edge`) cover the parser distinction, the
-snapshot-reading function against a real OS pipe, and the downstream
-path-selection logic, respectively. All 9 unit tests pass (the 6 from the
-prior two fixes, unmodified, plus these 3).
+`test_startup_detects_already_down_edge`,
+`test_startup_rejects_unexpected_link_state`) cover the parser distinction,
+the snapshot-reading function against a real OS pipe, the downstream
+path-selection logic, and rejection of an unrecognised `link_state` value
+(found by review: `down_edges_from_snapshot` originally treated anything
+other than `"down"` as implicitly up, including an empty string or unknown
+value OVS documents `Interface.link_state` as capable of carrying -- fixed
+to require exactly `"up"` or `"down"`, raising otherwise). `main()` was
+also wrapped so a fatal startup path (missing interface, no viable initial
+path, or an unrecognised `link_state`) still terminates the monitor
+subprocess rather than leaking it, matching the existing SIGTERM/SIGINT
+handler's cleanup for the signal-driven case. All 10 unit tests pass (the 6
+from the prior two fixes, unmodified, plus these 4).
+
+## A bug in this report's own verification harness
+
+A second code review, of `stage3_startup_already_down.py` itself, found
+that its original `ping_had_loss` field was computed with
+`"0% packet loss" not in ping_output`, a substring check -- and `"100%
+packet loss"` contains `"0% packet loss"` as a substring (the trailing
+`"0%"` of `"100%"`), so the 100%-loss pre-fix run was silently reported as
+`ping_had_loss: false` in the raw stored JSON. The script's `correct` field
+was unaffected, because it never used `ping_had_loss` in its own success
+condition (it already correctly failed the pre-fix run on the wrong
+`initial_path`/`down_edges` fields), and neither did the figure-generation
+script, which parsed the numeric loss percentage directly out of
+`ping_output_tail` rather than through this boolean -- so Figure 7's 100%
+vs. 0% headline numbers were never wrong. The harness itself was fixed with
+a proper `parse_ping_loss_pct()` function (with its own regression test,
+`test_stage3_startup_already_down.py`, reproducing the exact "100%
+packet loss" string that triggered the bug), and `correct` now also
+requires `ping_loss_pct == 0.0` for the fixed-agent run explicitly, rather
+than only checking the agent's own reported path/edges.
 
 ## Live-network result
 
@@ -64,9 +93,10 @@ reads the agent's own `agent_started` log line and immediately runs a
 20-packet ping with no fault injected during the run -- the fault is
 already present at the moment the agent starts.
 
-Run once against the current (fixed) agent and once, for direct
-comparison, against the unmodified pre-fix agent from the `v0.4.0` artifact
-release:
+Run three times against the current (fixed) agent as a robustness check
+(all three produced the identical `CORRECT` result, `0%` loss), and once,
+for direct comparison, against the unmodified pre-fix agent from the
+`v0.4.0` artifact release:
 
 | | Initial path installed | Edge s1-s2 detected down at startup? | Ping packet loss |
 |---|---|---:|---:|
@@ -82,20 +112,28 @@ was never going to arrive. The fixed agent's `agent_started` log line
 reports `down_edges: [["s1", "s2"]]` and `initial_path: ["s1", "s3",
 "s4"]`, and the ping ran with `0% packet loss` from the first packet.
 
-This is a single deterministic repetition each, not a sampled measurement
--- the outcome (total failure vs. immediate correct routing) does not vary
-run to run for this scenario, so `n=1` is reported as the demonstration it
-is, not with any statistical framing.
+This is a functional before/after correctness demonstration, not a
+statistical performance estimate -- a link is either correctly detected as
+down at startup or it is not -- so no inferential statistics are applied;
+the fixed-agent repetitions are reported to show the result is repeatable,
+not to support a percentile or significance claim.
 
 ## Claim boundary
 
-This closes a real startup/restart correctness gap for the single-link,
-single-topology scenario tested: an interface already down at agent start
-is now correctly detected from the OVSDB initial snapshot and routed
-around before the first flow is installed. It does not establish: behaviour
-when *multiple* monitored interfaces are down simultaneously at startup in
-more complex topologies; behaviour if the initial snapshot itself is
-delivered across more than one line (not observed in this environment, but
-not proven impossible on a larger table); or reconnect/resynchronization
-behaviour if the `ovsdb-client monitor` subprocess dies and is restarted
-mid-run, which remains a separate, unaddressed reliability gap.
+This closes initial topology-state synchronization for a *fresh* agent
+process, on the single-link, single-topology scenario tested: an interface
+already down when the agent starts is now correctly detected from the
+OVSDB initial snapshot and routed around before the first flow is
+installed. It does not establish: behaviour when *multiple* monitored
+interfaces are down simultaneously at startup in more complex topologies;
+behaviour if the initial snapshot itself is delivered across more than one
+line (not observed in this environment, but not proven impossible on a
+larger table); a full *process restart* where OVS already holds flow state
+installed by a previous agent instance (this experiment starts a fresh
+testbed, it does not simulate an agent restarting against a live prior
+deployment, and the current implementation has no reconciliation logic for
+pre-existing flows beyond recomputing and reinstalling a path over whatever
+is already there); or reconnect/resynchronization behaviour if the
+`ovsdb-client monitor` subprocess dies and is restarted while the agent's
+own process keeps running, which remains a separate, unaddressed
+reliability gap.

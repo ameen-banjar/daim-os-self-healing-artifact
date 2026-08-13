@@ -3,49 +3,49 @@
   "agent_started_seen": true,
   "events": [
     {
-      "ts": 1786596756.4849136,
+      "ts": 1786619779.3827462,
       "event": "flow_start",
       "action": "add",
       "bridge": "s1",
       "arg": "priority=100,in_port=1,actions=output:2"
     },
     {
-      "ts": 1786596756.5005562,
+      "ts": 1786619779.4018488,
       "event": "flow_start",
       "action": "add",
       "bridge": "s1",
       "arg": "priority=100,in_port=2,actions=output:1"
     },
     {
-      "ts": 1786596756.51384,
+      "ts": 1786619779.4176743,
       "event": "flow_start",
       "action": "add",
       "bridge": "s2",
       "arg": "priority=100,in_port=1,actions=output:2"
     },
     {
-      "ts": 1786596756.5277295,
+      "ts": 1786619779.4360092,
       "event": "flow_start",
       "action": "add",
       "bridge": "s2",
       "arg": "priority=100,in_port=2,actions=output:1"
     },
     {
-      "ts": 1786596756.5385487,
+      "ts": 1786619779.4551406,
       "event": "flow_start",
       "action": "add",
       "bridge": "s4",
       "arg": "priority=100,in_port=1,actions=output:3"
     },
     {
-      "ts": 1786596756.548314,
+      "ts": 1786619779.4738123,
       "event": "flow_start",
       "action": "add",
       "bridge": "s4",
       "arg": "priority=100,in_port=3,actions=output:1"
     },
     {
-      "ts": 1786596756.558628,
+      "ts": 1786619779.4911954,
       "event": "agent_started",
       "initial_path": [
         "s1",
@@ -61,7 +61,8 @@
   ],
   "down_edges_at_startup": null,
   "fatal_events": [],
-  "ping_output_tail": "eachable\r\nFrom 10.0.0.1 icmp_seq=8 Destination Host Unreachable\r\nFrom 10.0.0.1 icmp_seq=9 Destination Host Unreachable\r\nFrom 10.0.0.1 icmp_seq=10 Destination Host Unreachable\r\n\r\n--- 10.0.0.2 ping statistics ---\r\n20 packets transmitted, 0 received, +10 errors, 100% packet loss, time 4070ms\r\npipe 11\r\n",
-  "ping_had_loss": false,
+  "ping_output_tail": "eachable\r\nFrom 10.0.0.1 icmp_seq=8 Destination Host Unreachable\r\nFrom 10.0.0.1 icmp_seq=9 Destination Host Unreachable\r\nFrom 10.0.0.1 icmp_seq=10 Destination Host Unreachable\r\n\r\n--- 10.0.0.2 ping statistics ---\r\n20 packets transmitted, 0 received, +10 errors, 100% packet loss, time 4046ms\r\npipe 10\r\n",
+  "ping_loss_pct": 100.0,
+  "ping_had_loss": true,
   "correct": false
 }
