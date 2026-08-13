@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pure-logic unit tests for daim_link_agent, independent of Mininet/OVS/OVSDB.
 
-Six things are checked without a live network:
+Nine things are checked without a live network:
 1. `test_bfs_path_computation` -- the BFS-computed primary and alternate
    paths produce exactly the flow sets that were previously hand-written in
    stage3_link_recovery.py's install_primary()/install_alternate(), so the
@@ -30,13 +30,31 @@ Six things are checked without a live network:
    interface's `up` happened to be reported most recently (Section 4.7).
 6. `test_edge_recovers_once_both_interfaces_confirm_up` -- the positive
    case of the same fix: once every interface has confirmed `up`, the edge
-   is reconciled exactly once, not once per interface."""
+   is reconciled exactly once, not once per interface.
+7. `test_parse_monitor_line_initial_vs_new` -- a startup/restart regression
+   test found by code review and confirmed against a real ovsdb-server:
+   OVSDB's monitor reply reports a table's current contents with
+   `action=="initial"`, not `"new"`, so matching only `"new"` (an earlier
+   revision's default) silently discarded the whole startup snapshot
+   (Section 4.4).
+8. `test_read_initial_snapshot_reflects_already_down_interface` -- the same
+   fix one level up, using a real OS pipe to exercise the actual
+   select()/readline() code path main() uses.
+9. `test_startup_detects_already_down_edge` -- the other half of the same
+   fix: an edge already down at startup must be excluded from the initial
+   path computation, not silently assumed up."""
+import json
+import os
+
 from daim_link_agent import (
     MONITORED_INTERFACES,
     bfs_path,
     decide_link_event,
+    down_edges_from_snapshot,
     path_to_flows,
+    read_initial_snapshot,
     reconcile_expired_holddowns,
+    _parse_monitor_line,
     SOURCE,
     DEST,
 )
@@ -362,6 +380,112 @@ def test_edge_recovers_once_both_interfaces_confirm_up():
           "the edge is reconciled as recovered exactly once.")
 
 
+def test_parse_monitor_line_initial_vs_new():
+    """Regression test for a real startup/restart correctness bug found by
+    code review and confirmed against a live ovsdb-server (not assumed from
+    documentation alone): OVSDB's monitor reply reports the table's current
+    contents as its first line, with every row's `action` field set to
+    `"initial"`, not `"new"` -- `"new"` is what a *later* transition uses.
+    `_parse_monitor_line`'s old, undocumented default of matching only
+    `"new"` silently discarded the entire initial snapshot. This confirms
+    the `actions` parameter correctly distinguishes the two: the default
+    (`actions=("new",)`) still ignores an initial-snapshot line exactly as
+    before (real transitions are unaffected by this fix), while
+    `actions=("initial",)` -- what `read_initial_snapshot` uses -- correctly
+    extracts it."""
+    initial_line = json.dumps({
+        "headings": ["row", "action", "name", "link_state"],
+        "data": [
+            ["r1", "initial", "s1-eth2", "down"],
+            ["r2", "initial", "s2-eth1", "up"],
+        ],
+    })
+    update_line = json.dumps({
+        "headings": ["row", "action", "name", "link_state"],
+        "data": [
+            ["r1", "old", None, "down"],
+            ["", "new", "s1-eth2", "up"],
+        ],
+    })
+    assert _parse_monitor_line(initial_line) == [], (
+        "default actions=('new',) must still ignore action=='initial' rows, "
+        "matching real transition behaviour"
+    )
+    assert set(_parse_monitor_line(initial_line, actions=("initial",))) == {
+        ("s1-eth2", "down"), ("s2-eth1", "up"),
+    }, "actions=('initial',) must extract every initial-snapshot row"
+    assert _parse_monitor_line(update_line) == [("s1-eth2", "up")], (
+        "a real transition's 'new' row must still be extracted correctly"
+    )
+
+    print("daim_link_agent _parse_monitor_line initial-vs-new regression "
+          "test: PASS -- action=='initial' rows (the real startup snapshot "
+          "format) and action=='new' rows (real transitions) are correctly "
+          "distinguished.")
+
+
+def test_read_initial_snapshot_reflects_already_down_interface():
+    """Regression test for the startup bug itself, one level up from the
+    parser: read_initial_snapshot() must return a monitored interface's
+    already-`down` state from the very first line ovsdb-client monitor
+    sends, using a real OS pipe (not a mock) so this exercises the same
+    select()/readline() code path main() uses against a real subprocess."""
+    read_fd, write_fd = os.pipe()
+    reader, writer = os.fdopen(read_fd, "r"), os.fdopen(write_fd, "w")
+    try:
+        class FakeProc:
+            pass
+        proc = FakeProc()
+        proc.stdout = reader
+
+        writer.write(json.dumps({
+            "headings": ["row", "action", "name", "link_state"],
+            "data": [
+                ["r1", "initial", "s1-eth2", "down"],
+                ["r2", "initial", "s2-eth1", "down"],
+                ["r3", "initial", "s3-eth1", "up"],
+            ],
+        }) + "\n")
+        writer.flush()
+
+        snapshot = read_initial_snapshot(proc, timeout=2.0)
+        assert snapshot == {"s1-eth2": "down", "s2-eth1": "down"}, (
+            f"expected only monitored interfaces, correctly reflecting the "
+            f"already-down state a pre-fix agent would have silently missed: "
+            f"{snapshot}"
+        )
+    finally:
+        writer.close()
+        reader.close()
+
+    print("daim_link_agent read_initial_snapshot regression test: PASS -- "
+          "an interface already down at startup is correctly captured from "
+          "the initial OVSDB snapshot, filtered to monitored interfaces "
+          "only (s3-eth1 excluded).")
+
+
+def test_startup_detects_already_down_edge():
+    """The other half of the startup fix: down_edges_from_snapshot() (the
+    exact function main() calls) must turn an already-down monitored
+    interface into a down edge that BFS then routes around for the initial
+    path -- not the empty-set assumption a pre-fix agent made regardless of
+    real starting conditions."""
+    snapshot = {"s1-eth2": "down", "s2-eth1": "down"}
+    down_edges = down_edges_from_snapshot(snapshot)
+    assert down_edges == {EDGE}, down_edges
+
+    initial_path = bfs_path(SOURCE, DEST, down_edges)
+    assert initial_path == ["s1", "s3", "s4"], (
+        f"agent must install the alternate path from startup when the "
+        f"primary-path edge is already down, not the primary path a "
+        f"pre-fix agent would have installed regardless: {initial_path}"
+    )
+
+    print("daim_link_agent startup-state regression test: PASS -- an edge "
+          "already down at startup is correctly excluded from the initial "
+          "path computation, instead of being silently assumed up.")
+
+
 def main():
     test_bfs_path_computation()
     test_holddown_suppresses_flapping()
@@ -369,6 +493,9 @@ def main():
     test_holddown_covers_both_interfaces_on_same_edge()
     test_edge_recovery_requires_all_interfaces_confirmed_up()
     test_edge_recovers_once_both_interfaces_confirm_up()
+    test_parse_monitor_line_initial_vs_new()
+    test_read_initial_snapshot_reflects_already_down_interface()
+    test_startup_detects_already_down_edge()
 
 
 if __name__ == "__main__":

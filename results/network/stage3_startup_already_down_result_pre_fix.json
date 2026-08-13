@@ -1,0 +1,67 @@
+{
+  "evidence_level": "measured_emulation_startup_already_down",
+  "agent_started_seen": true,
+  "events": [
+    {
+      "ts": 1786596756.4849136,
+      "event": "flow_start",
+      "action": "add",
+      "bridge": "s1",
+      "arg": "priority=100,in_port=1,actions=output:2"
+    },
+    {
+      "ts": 1786596756.5005562,
+      "event": "flow_start",
+      "action": "add",
+      "bridge": "s1",
+      "arg": "priority=100,in_port=2,actions=output:1"
+    },
+    {
+      "ts": 1786596756.51384,
+      "event": "flow_start",
+      "action": "add",
+      "bridge": "s2",
+      "arg": "priority=100,in_port=1,actions=output:2"
+    },
+    {
+      "ts": 1786596756.5277295,
+      "event": "flow_start",
+      "action": "add",
+      "bridge": "s2",
+      "arg": "priority=100,in_port=2,actions=output:1"
+    },
+    {
+      "ts": 1786596756.5385487,
+      "event": "flow_start",
+      "action": "add",
+      "bridge": "s4",
+      "arg": "priority=100,in_port=1,actions=output:3"
+    },
+    {
+      "ts": 1786596756.548314,
+      "event": "flow_start",
+      "action": "add",
+      "bridge": "s4",
+      "arg": "priority=100,in_port=3,actions=output:1"
+    },
+    {
+      "ts": 1786596756.558628,
+      "event": "agent_started",
+      "initial_path": [
+        "s1",
+        "s2",
+        "s4"
+      ]
+    }
+  ],
+  "initial_path": [
+    "s1",
+    "s2",
+    "s4"
+  ],
+  "down_edges_at_startup": null,
+  "fatal_events": [],
+  "ping_output_tail": "eachable\r\nFrom 10.0.0.1 icmp_seq=8 Destination Host Unreachable\r\nFrom 10.0.0.1 icmp_seq=9 Destination Host Unreachable\r\nFrom 10.0.0.1 icmp_seq=10 Destination Host Unreachable\r\n\r\n--- 10.0.0.2 ping statistics ---\r\n20 packets transmitted, 0 received, +10 errors, 100% packet loss, time 4070ms\r\npipe 11\r\n",
+  "ping_had_loss": false,
+  "correct": false
+}

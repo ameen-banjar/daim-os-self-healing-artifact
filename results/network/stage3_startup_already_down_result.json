@@ -1,0 +1,78 @@
+{
+  "evidence_level": "measured_emulation_startup_already_down",
+  "agent_started_seen": true,
+  "events": [
+    {
+      "ts": 1786575765.6488802,
+      "event": "flow_start",
+      "action": "add",
+      "bridge": "s1",
+      "arg": "priority=100,in_port=1,actions=output:3"
+    },
+    {
+      "ts": 1786575765.6593428,
+      "event": "flow_start",
+      "action": "add",
+      "bridge": "s1",
+      "arg": "priority=100,in_port=3,actions=output:1"
+    },
+    {
+      "ts": 1786575765.6694193,
+      "event": "flow_start",
+      "action": "add",
+      "bridge": "s3",
+      "arg": "priority=100,in_port=1,actions=output:2"
+    },
+    {
+      "ts": 1786575765.679741,
+      "event": "flow_start",
+      "action": "add",
+      "bridge": "s3",
+      "arg": "priority=100,in_port=2,actions=output:1"
+    },
+    {
+      "ts": 1786575765.6891003,
+      "event": "flow_start",
+      "action": "add",
+      "bridge": "s4",
+      "arg": "priority=100,in_port=2,actions=output:3"
+    },
+    {
+      "ts": 1786575765.6990716,
+      "event": "flow_start",
+      "action": "add",
+      "bridge": "s4",
+      "arg": "priority=100,in_port=3,actions=output:2"
+    },
+    {
+      "ts": 1786575765.7136126,
+      "event": "agent_started",
+      "initial_path": [
+        "s1",
+        "s3",
+        "s4"
+      ],
+      "down_edges": [
+        [
+          "s1",
+          "s2"
+        ]
+      ]
+    }
+  ],
+  "initial_path": [
+    "s1",
+    "s3",
+    "s4"
+  ],
+  "down_edges_at_startup": [
+    [
+      "s1",
+      "s2"
+    ]
+  ],
+  "fatal_events": [],
+  "ping_output_tail": "p_seq=18 ttl=64 time=0.105 ms\r\n64 bytes from 10.0.0.2: icmp_seq=19 ttl=64 time=0.131 ms\r\n64 bytes from 10.0.0.2: icmp_seq=20 ttl=64 time=0.072 ms\r\n\r\n--- 10.0.0.2 ping statistics ---\r\n20 packets transmitted, 20 received, 0% packet loss, time 1546ms\r\nrtt min/avg/max/mdev = 0.032/0.173/1.128/0.225 ms\r\n",
+  "ping_had_loss": false,
+  "correct": true
+}

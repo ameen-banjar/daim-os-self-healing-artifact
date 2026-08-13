@@ -252,10 +252,21 @@ def decide_link_event(name, state, down_edges, held_down_until,
     return {"action": "ignored", "interface": name, "state": state}
 
 
-def _parse_monitor_line(line):
+def _parse_monitor_line(line, actions=("new",)):
     """Parses one ovsdb-client monitor JSON line into a list of (name, state)
-    pairs for 'new' Interface rows. Pure function, split out so it is
-    testable without a subprocess."""
+    pairs for Interface rows whose `action` is in `actions`. Pure function,
+    split out so it is testable without a subprocess.
+
+    OVSDB's monitor reply reports the table's *current* contents as its
+    first line, with each of those rows' `action` field set to `"initial"`
+    -- not `"new"`, which is reserved for a row added or changed by a
+    *later* update (confirmed empirically against a real ovsdb-server: the
+    initial dump is one JSON blob with `action":"initial"` on every row;
+    each subsequent transition instead sends an `"old"` row, giving the
+    previous value, immediately followed by a `"new"` row with the current
+    one). The default `actions=("new",)` is for the ongoing event stream;
+    `read_initial_snapshot()` below calls this with `actions=("initial",)`
+    for the one-time startup read."""
     line = line.strip()
     if not line:
         return []
@@ -271,7 +282,7 @@ def _parse_monitor_line(line):
     state_i = headings.index("link_state")
     rows = []
     for row in payload.get("data", []):
-        if row[action_i] != "new":
+        if row[action_i] not in actions:
             continue
         name = row[name_i]
         state = row[state_i]
@@ -280,9 +291,56 @@ def _parse_monitor_line(line):
     return rows
 
 
-def monitor_link_rows(poll_interval=None):
+def _start_monitor():
+    global _monitor_proc
+    proc = subprocess.Popen(
+        ["ovsdb-client", "monitor", "Interface", "name,link_state", "--format=json"],
+        stdout=subprocess.PIPE, text=True, bufsize=1,
+    )
+    _monitor_proc = proc
+    return proc
+
+
+def read_initial_snapshot(proc, timeout=10.0):
+    """Reads exactly the first line ovsdb-client monitor sends -- the table's
+    current contents at subscription time, one row per interface, every row
+    carrying `action=="initial"` -- and returns {interface_name: link_state}
+    for every *monitored* interface reported in it.
+
+    This closes a real startup/restart correctness gap: an earlier revision
+    of this agent only ever matched `action=="new"` (see _parse_monitor_line),
+    so a monitored interface that was already `down` when the agent started
+    or restarted was silently invisible -- the agent would compute and
+    install its initial path assuming every edge was up, potentially routing
+    traffic through a link that was already failed, and nothing would ever
+    correct that unless a further transition happened to arrive later for
+    that specific interface. Found by code review, verified empirically
+    against a real ovsdb-server before being treated as real (a fresh
+    `ovsdb-client monitor` against a live OVS bridge does report
+    `action":"initial"` on its first line, not `"new"`).
+
+    Interfaces absent from the initial snapshot are left absent from the
+    returned dict -- deliberately not defaulted to "up" here, unlike
+    `_edge_confirmed_up`'s runtime default: `main()` treats any
+    `MONITORED_INTERFACES` entry missing from this snapshot as a fatal
+    misconfiguration rather than silently assuming it is fine."""
+    import select
+    ready, _, _ = select.select([proc.stdout], [], [], timeout)
+    if not ready:
+        raise RuntimeError("no initial OVSDB snapshot received within timeout")
+    line = proc.stdout.readline()
+    if not line:
+        raise RuntimeError("OVSDB monitor closed before sending an initial snapshot")
+    rows = _parse_monitor_line(line, actions=("initial",))
+    return {name: state for name, state in rows if name in MONITORED_INTERFACES}
+
+
+def monitor_link_rows(proc, poll_interval=None):
     """Yields (name, link_state) for every real 'new' row OVSDB pushes on
-    Interface.link_state, in the order ovsdb-client delivers them.
+    Interface.link_state on an *already-started* monitor subprocess (see
+    _start_monitor/read_initial_snapshot, which must run first so the
+    initial snapshot this generator does not handle is not lost), in the
+    order ovsdb-client delivers them.
 
     If `poll_interval` is given, also yields `None` at least every
     `poll_interval` seconds when no OVSDB event has arrived. This is *not*
@@ -293,12 +351,6 @@ def monitor_link_rows(poll_interval=None):
     interface's hold-down window expires with no further event ever seen
     for it (see reconcile_expired_holddowns' docstring for why that case
     needs a wake-up source at all)."""
-    global _monitor_proc
-    proc = subprocess.Popen(
-        ["ovsdb-client", "monitor", "Interface", "name,link_state", "--format=json"],
-        stdout=subprocess.PIPE, text=True, bufsize=1,
-    )
-    _monitor_proc = proc
     if poll_interval is None:
         for line in proc.stdout:
             for name, state in _parse_monitor_line(line):
@@ -318,22 +370,46 @@ def monitor_link_rows(poll_interval=None):
             yield name, state
 
 
+def down_edges_from_snapshot(snapshot):
+    """Derives the set of down edges implied by an initial (or any other)
+    {interface_name: link_state} snapshot -- pulled out of main() as its own
+    pure function so the startup-state-detection logic is exercised
+    identically by main() and by test_startup_detects_already_down_edge()."""
+    down_edges = set()
+    for name, state in snapshot.items():
+        if state == "down" and name in MONITORED_INTERFACES:
+            switch, neighbor = MONITORED_INTERFACES[name]
+            down_edges.add(frozenset({switch, neighbor}))
+    return down_edges
+
+
 def main():
-    current_path = bfs_path(SOURCE, DEST, down_edges=set())
+    proc = _start_monitor()
+    initial = read_initial_snapshot(proc)
+    missing = [name for name in MONITORED_INTERFACES if name not in initial]
+    if missing:
+        log("fatal", reason="missing initial OVSDB state for monitored interface(s)",
+            interfaces=missing)
+        sys.exit(1)
+
+    interface_state = dict(initial)
+    down_edges = down_edges_from_snapshot(initial)
+
+    current_path = bfs_path(SOURCE, DEST, down_edges)
     if not current_path:
-        log("fatal", reason="no initial path")
+        log("fatal", reason="no initial path avoiding edges already down at startup",
+            down_edges=[list(edge) for edge in down_edges])
         sys.exit(1)
     install_path(current_path)
-    log("agent_started", initial_path=current_path)
+    log("agent_started", initial_path=current_path,
+        down_edges=[list(edge) for edge in down_edges])
 
-    down_edges = set()
     held_down_until = {}
-    interface_state = {}
 
     # poll_interval only drives reconcile_expired_holddowns() wake-ups
     # (see that function's docstring); it is well under HOLD_DOWN_SECONDS so
     # an expired window is reconciled promptly even with no further event.
-    for event in monitor_link_rows(poll_interval=HOLD_DOWN_SECONDS / 4):
+    for event in monitor_link_rows(proc, poll_interval=HOLD_DOWN_SECONDS / 4):
         if event is None:
             recovered = reconcile_expired_holddowns(
                 held_down_until, interface_state, down_edges, time.monotonic(),

@@ -15,6 +15,7 @@ placed on the page. Every canvas here targets roughly 150-170 effective DPI
 at 6.3in insertion, so figure text prints close to the ~11pt body text size.
 """
 import csv
+import json
 import sys
 from pathlib import Path
 
@@ -25,6 +26,8 @@ NETWORK_DIR = ROOT / "network"
 RAW = ROOT / "results/network/stage3_autonomous_agent_raw.csv"
 FLAP_RAW = ROOT / "results/network/stage3_holddown_flapping_raw.csv"
 FLAP_RAW_PRE_FIX = ROOT / "results/network/stage3_holddown_flapping_raw_pre_edgefix.csv"
+STARTUP_RESULT = ROOT / "results/network/stage3_startup_already_down_result.json"
+STARTUP_RESULT_PRE_FIX = ROOT / "results/network/stage3_startup_already_down_result_pre_fix.json"
 OUT = ROOT / "results/paper3"
 OUT.mkdir(parents=True, exist_ok=True)
 
@@ -536,6 +539,80 @@ def draw_live_holddown_comparison(path):
     image.save(path)
 
 
+# ------------------------------------------------------------- Figure 7 ----
+
+def draw_startup_comparison(path):
+    pre = json.loads(STARTUP_RESULT_PRE_FIX.read_text())
+    post = json.loads(STARTUP_RESULT.read_text())
+
+    def loss_pct(result):
+        tail = result["ping_output_tail"]
+        for line in tail.splitlines():
+            if "packet loss" in line:
+                # e.g. "20 packets transmitted, 20 received, 0% packet loss, ..."
+                for part in line.split(","):
+                    part = part.strip()
+                    if part.endswith("% packet loss"):
+                        return part.replace("% packet loss", "")
+        return "?"
+
+    pre_loss = loss_pct(pre)
+    post_loss = loss_pct(post)
+    pre_path = " -> ".join(pre["initial_path"]) if pre["initial_path"] else "?"
+    post_path = " -> ".join(post["initial_path"]) if post["initial_path"] else "?"
+
+    width, height = 1750, 980
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+    title_font = ImageFont.load_default(size=44)
+    font = ImageFont.load_default(size=38)
+    small = ImageFont.load_default(size=32)
+
+    draw.text((24, 24), "Startup with a link already down:", fill="#111111", font=title_font)
+    draw.text((24, 76), "before vs after the initial-snapshot fix", fill="#111111", font=title_font)
+    draw.text(
+        (24, 138),
+        "s1-s2 brought down before the agent process starts; n=1 each (deterministic outcome, not sampled)",
+        fill="#666666", font=small,
+    )
+
+    cols = [
+        ("Initial path installed", pre_path, post_path, "agent log"),
+        ("Edge s1-s2 down\nat startup?", "no", "yes", "initial OVSDB"),
+        ("Ping packet loss", f"{pre_loss}%", f"{post_loss}%", "20-pkt probe"),
+    ]
+    label_w = max(draw.textlength(l.split("\n")[0], font=font) for l, *_ in cols)
+    val_col0 = 60 + int(label_w) + 60
+    col_w = 420
+    left0 = 60
+    top = 260
+    row_h = 90
+    header_y = top
+    draw.text((val_col0, header_y), "before (buggy)", fill="#D55E00", font=font)
+    draw.text((val_col0 + col_w, header_y), "after (fixed)", fill="#0072B2", font=font)
+    y = header_y + 90
+    for label, before_val, after_val, unit in cols:
+        lb = label.split("\n")
+        for li, line in enumerate(lb):
+            draw.text((left0, y + li * 40), line, fill="#222222", font=font)
+        draw.text((val_col0, y), before_val, fill="#D55E00", font=title_font)
+        draw.text((val_col0 + col_w, y), after_val, fill="#0072B2", font=title_font)
+        draw.text((val_col0 + 2 * col_w, y + 8), unit, fill="#888888", font=small)
+        y += row_h + (40 if len(lb) > 1 else 0)
+        draw.line((left0, y - 20, 1650, y - 20), fill="#dddddd", width=2)
+
+    draw.text(
+        (24, y + 30),
+        "The defect: OVSDB reports a subscribed table's current contents with action==\"initial\", not\n"
+        "\"new\" -- the pre-fix agent matched only \"new\", silently discarding the entire startup snapshot.\n"
+        "It installed the primary path through the already-dead s1-s2 link and had no way to ever find\n"
+        "out, since no further transition was going to arrive for an interface whose state never changed.\n"
+        "Reading the real \"initial\" snapshot before computing the first path fixes this.",
+        fill="#333333", font=small,
+    )
+    image.save(path)
+
+
 def main():
     draw_architecture(OUT / "paper3_architecture.png")
     draw_sequence(OUT / "paper3_sequence.png")
@@ -543,10 +620,11 @@ def main():
     draw_recovery_chart(OUT / "paper3_recovery_timeline.png")
     draw_holddown_timeline(OUT / "paper3_holddown_timeline.png")
     draw_live_holddown_comparison(OUT / "paper3_holddown_live_comparison.png")
+    draw_startup_comparison(OUT / "paper3_startup_comparison.png")
     print("Wrote:")
     for name in ("paper3_architecture.png", "paper3_sequence.png", "paper3_topology.png",
                  "paper3_recovery_timeline.png", "paper3_holddown_timeline.png",
-                 "paper3_holddown_live_comparison.png"):
+                 "paper3_holddown_live_comparison.png", "paper3_startup_comparison.png"):
         print(" ", OUT / name)
 
 
