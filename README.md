@@ -57,7 +57,7 @@ uses them.
   performs the actual OVSDB/adapter I/O. Hold-down state is keyed by physical
   edge (the frozenset of the two switches a link connects), not by interface
   name, since v0.3.0 (see below).
-- `network/test_daim_link_agent.py` — ten pure-logic unit tests, runnable
+- `network/test_daim_link_agent.py` — eleven pure-logic unit tests, runnable
   with plain `python3` and no Mininet/OVS/OVSDB: (1) BFS path computation
   against hand-verified expected flow sets; (2) the hold-down state machine
   driven through a synthetic seven-transition flapping-link sequence, with
@@ -67,9 +67,11 @@ uses them.
   described below; (5)-(6) two edge-confirmation regression tests
   reproducing the v0.4.0 defect described below; (7)-(9) three
   startup-synchronization regression tests reproducing the v0.5.0 defect
-  described below; (10) a robustness test confirming an unrecognised
-  `link_state` value is rejected rather than silently treated as "up"
-  (v0.6.0).
+  described below; (10) a startup-validation robustness test confirming an
+  unrecognised `link_state` value is rejected rather than silently treated
+  as "up" (v0.6.0); (11) the same check's runtime counterpart, confirming
+  `decide_link_event()` rejects an unrecognised `link_state` in the
+  ongoing event stream instead of falling through to "ignored" (v0.7.0).
 - `network/test_stage3_startup_already_down.py` — a regression test for a
   bug in the startup live-network harness itself (v0.6.0, see below), kept
   separate from `test_daim_link_agent.py` since it tests the harness, not
@@ -162,6 +164,31 @@ and installed the correct alternate path directly: **0% packet loss** from
 the first probe packet. Both raw JSON results are retained side by side in
 `results/network/`; the full writeup is
 `results/network/STAGE3_STARTUP_ALREADY_DOWN_REPORT.md`.
+
+## Runtime link_state validation and a figure mislabelling fix (v0.7.0)
+
+Two more findings from re-reading the v0.6.0 code and figures together:
+
+- **Runtime `link_state` validation.** v0.6.0 validated the OVSDB *startup*
+  snapshot but not the ongoing event stream: `decide_link_event()` took
+  whatever `state` a live event reported and, if it wasn't `"up"` or
+  `"down"`, silently fell through to a generic `"ignored"` action -- the
+  same silently-assume-fine gap the startup fix closed, reached through a
+  different code path. `decide_link_event()` now returns a distinct
+  `invalid_link_state` action for this case, before touching any state,
+  with its own regression test.
+- **`paper3_holddown_live_comparison.png`'s "BFS/recompute calls" row was
+  wrong.** It was computed as `len(sequence) - suppressed_count`, i.e.
+  every non-suppressed action -- but `"recovered"` never calls
+  `bfs_path()` (only `decide_link_event()`'s `state=="down"` branch does),
+  so counting it as a BFS call was wrong. The real count, using only
+  `repair`/`noop`/`repair_failed`, is 1 in both the pre-fix and post-fix
+  live runs for this specific flap schedule (it only ever pushes one edge
+  through the down-and-not-already-down branch once) -- not the 4-to-2 the
+  figure previously showed. Figure 5's synthetic, multi-transition
+  schedule is what actually demonstrates the BFS-call reduction; this live
+  figure now says so explicitly instead of implying a reduction the live
+  data never measured.
 
 ## Robustness hardening and a harness bug fix (v0.6.0)
 

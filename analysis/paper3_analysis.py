@@ -467,15 +467,29 @@ def draw_live_holddown_comparison(path):
         # transition on the interface that was never held down), so a
         # sequence ending in "recovered" is not by itself enough to tell the
         # two conditions apart; the repeated middle occurrences are what the
-        # figure needs to surface. "BFS/recomputation calls" mirrors the
-        # count reported for the logic-level test in Figure 5 (repair + noop
-        # + recovered actions, i.e. every action that is not "suppressed"),
-        # so the two figures use directly comparable units.
+        # figure needs to surface.
+        #
+        # "BFS/recompute calls" must count only the actions decide_link_event()
+        # actually reaches bfs_path() for: "repair", "noop", and
+        # "repair_failed" (the three outcomes of its `state=="down"` branch).
+        # "recovered" does NOT call BFS -- it just clears down_edges. An
+        # earlier revision of this function computed
+        # `len(sequence) - suppressed_count`, i.e. every non-suppressed
+        # action including "recovered", which is why it reported 4/2 here;
+        # the real count in both live conditions is 1, because this flap
+        # schedule only ever pushes one edge through the "down and not
+        # already in down_edges" branch once -- the recomputation-count
+        # *reduction* Figure 5 demonstrates is a logic-level result over a
+        # schedule with multiple distinct down_edges-triggering transitions,
+        # not something this specific live protocol was designed to
+        # reproduce (see Section 7.3's discussion of this exact point).
         seqs = [r["observed_action_sequence"].split(";") for r in rows]
         clean = sum(1 for s in seqs if s.count("repair") == 1 and s.count("recovered") == 1)
         spurious_recovered = [s.count("recovered") - 1 for s in seqs]
         suppressed = [s.count("suppressed") for s in seqs]
-        bfs_calls = [len(s) - s.count("suppressed") for s in seqs]
+        bfs_calls = [
+            s.count("repair") + s.count("noop") + s.count("repair_failed") for s in seqs
+        ]
         return {
             "mean_loss": sum(losses) / len(losses),
             "clean": clean,
@@ -506,7 +520,7 @@ def draw_live_holddown_comparison(path):
         ("Clean sequences", f"{pre_s['clean']}/{pre_s['n']}", f"{post_s['clean']}/{post_s['n']}", "1 repair, 1 recovered per run"),
         ("Spurious recoveries", f"{pre_s['mean_spurious']:.0f}", f"{post_s['mean_spurious']:.0f}", "mean per repetition"),
         ("Suppressed reports", f"{pre_s['mean_suppressed']:.0f}", f"{post_s['mean_suppressed']:.0f}", "both interfaces, mean/rep"),
-        ("BFS/recompute calls", f"{pre_s['mean_bfs']:.0f}", f"{post_s['mean_bfs']:.0f}", "same units as Figure 5"),
+        ("BFS/recompute calls", f"{pre_s['mean_bfs']:.0f}", f"{post_s['mean_bfs']:.0f}", "1 either way here, see caption"),
         ("Mean packet loss", f"{pre_s['mean_loss']:.1f}%", f"{post_s['mean_loss']:.1f}%", "200-pkt probe, no stat. weight"),
     ]
     label_w = max(draw.textlength(label, font=font) for label, *_ in cols)
@@ -533,7 +547,9 @@ def draw_live_holddown_comparison(path):
         "Hold-down keyed by interface name only suppressed the side that triggered the repair -- the other\n"
         "side's transitions on the SAME link went through unsuppressed, each logged as its own spurious\n"
         "'recovered' event. Keying hold-down by edge instead fixes this. The actual flow repair is 1 either\n"
-        "way -- what changes is how many of the link's reported transitions are correctly suppressed.",
+        "way -- what changes is how many of the link's reported transitions are correctly suppressed.\n"
+        "BFS/recompute calls stay at 1 either way here because this schedule only pushes one edge through\n"
+        "the down-and-not-already-down branch once; the BFS-call reduction is Figure 5's logic-level result.",
         fill="#333333", font=small,
     )
     image.save(path)
@@ -569,7 +585,7 @@ def draw_startup_comparison(path):
     draw.text((24, 76), "before vs after the initial-snapshot fix", fill="#111111", font=title_font)
     draw.text(
         (24, 138),
-        "s1-s2 brought down before the agent process starts; n=1 each (deterministic outcome, not sampled)",
+        "s1-s2 brought down before the agent process starts; pre-fix n=1, fixed n=3 robustness reps",
         fill="#666666", font=small,
     )
 

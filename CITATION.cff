@@ -6,10 +6,11 @@ authors:
   - family-names: Banjar
     given-names: Ameen
     orcid: "https://orcid.org/0000-0002-0871-5153"
-version: 0.6.0
+version: 0.7.0
 date-released: 2026-08-13
 license: Apache-2.0
-doi: 10.5281/zenodo.21918394
+# doi: TODO -- fill in the v0.7.0 version-specific DOI once this tag's
+# release is minted by Zenodo. v0.6.0 DOI: 10.5281/zenodo.21918394.
 # v0.5.0 DOI: 10.5281/zenodo.21912414. v0.4.0 DOI: 10.5281/zenodo.21910227.
 # v0.3.0 DOI: 10.5281/zenodo.21909633. v0.1.0 DOI: 10.5281/zenodo.21906993.
 # Concept DOI (always resolves to latest version): 10.5281/zenodo.21906992.
@@ -50,10 +51,19 @@ abstract: >-
   fixed (v0.6.0), with its own regression test -- the underlying 100%/0%
   result was unaffected, since the figure-generation script parsed the
   numeric loss value independently, but the harness's own boolean field was
-  wrong until this fix. Contains pure-logic unit tests for the path
-  computation and all hold-down/startup behaviours (suppression, stale-state
-  reconciliation, cross-interface coverage, edge-confirmation, startup
-  synchronization, link_state validation), all
+  wrong until this fix. v0.7.0 extends link_state validation to the ongoing
+  event stream, not just the startup snapshot (decide_link_event() now
+  returns a distinct invalid_link_state action instead of silently falling
+  through to a no-op), and fixes a mislabelling bug in the flapping-link
+  comparison figure: its "BFS/recompute calls" row previously counted every
+  non-suppressed action including "recovered", which never calls BFS, so it
+  reported 4-to-2 when the real count (repair/noop/repair_failed only) is
+  1-to-1 for this specific live schedule -- the BFS-call-reduction claim is
+  Figure 5's logic-level result, not this live figure's. Contains pure-logic
+  unit tests for the path computation and all hold-down/startup behaviours
+  (suppression, stale-state reconciliation, cross-interface coverage,
+  edge-confirmation, startup synchronization, link_state validation at both
+  startup and runtime), all
   runnable without Mininet/OVS; live-network flapping-link and
   startup-already-down scripts and their raw data and event logs across every
   pre-fix and post-fix run, retained side by side; the network-level Stage 3

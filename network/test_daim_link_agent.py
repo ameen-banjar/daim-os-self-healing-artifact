@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pure-logic unit tests for daim_link_agent, independent of Mininet/OVS/OVSDB.
 
-Ten things are checked without a live network:
+Eleven things are checked without a live network:
 1. `test_bfs_path_computation` -- the BFS-computed primary and alternate
    paths produce exactly the flow sets that were previously hand-written in
    stage3_link_recovery.py's install_primary()/install_alternate(), so the
@@ -44,8 +44,12 @@ Ten things are checked without a live network:
    fix: an edge already down at startup must be excluded from the initial
    path computation, not silently assumed up.
 10. `test_startup_rejects_unexpected_link_state` -- a robustness check found
-    by review: an unrecognised `link_state` value must be rejected, not
-    silently treated as "up"."""
+    by review: an unrecognised `link_state` value must be rejected at
+    startup, not silently treated as "up".
+11. `test_decide_link_event_rejects_unexpected_link_state` -- the same
+    check's runtime counterpart: an unrecognised `link_state` value in the
+    ongoing event stream must be rejected outright, not fall through to
+    "ignored"."""
 import json
 import os
 
@@ -513,6 +517,31 @@ def test_startup_rejects_unexpected_link_state():
           "exactly 'up' or 'down' instead of silently treating it as up.")
 
 
+def test_decide_link_event_rejects_unexpected_link_state():
+    """Runtime counterpart of the startup-snapshot validation above:
+    decide_link_event() must reject an unrecognised link_state value
+    outright, before touching down_edges/interface_state/held_down_until,
+    rather than falling through to the generic "ignored" action the way an
+    earlier revision did. Found by review: only the startup snapshot was
+    validated, not the ongoing event stream, which is the same
+    silently-assume-fine gap in a different code path."""
+    down_edges = set()
+    held_down_until, interface_state = {}, {}
+    current_path = ["s1", "s2", "s4"]
+
+    d = decide_link_event(
+        INTERFACE, "unknown", down_edges, held_down_until,
+        interface_state, current_path, 0.0,
+    )
+    assert d["action"] == "invalid_link_state", d
+    assert down_edges == set(), "must not mutate down_edges on an invalid state"
+    assert interface_state == {}, "must not record an invalid state as observed"
+
+    print("daim_link_agent runtime invalid-link_state regression test: "
+          "PASS -- decide_link_event rejects an unrecognised state instead "
+          "of silently treating it as 'ignored'.")
+
+
 def main():
     test_bfs_path_computation()
     test_holddown_suppresses_flapping()
@@ -524,6 +553,7 @@ def main():
     test_read_initial_snapshot_reflects_already_down_interface()
     test_startup_detects_already_down_edge()
     test_startup_rejects_unexpected_link_state()
+    test_decide_link_event_rejects_unexpected_link_state()
 
 
 if __name__ == "__main__":

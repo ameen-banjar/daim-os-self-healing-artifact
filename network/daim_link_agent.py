@@ -226,6 +226,15 @@ def decide_link_event(name, state, down_edges, held_down_until,
     switch, neighbor = MONITORED_INTERFACES[name]
     edge = frozenset({switch, neighbor})
 
+    # Runtime counterpart of the startup snapshot's link_state validation
+    # (down_edges_from_snapshot): an unrecognised value is rejected outright,
+    # before touching any state, rather than falling through to the final
+    # "ignored" return -- the same silent-unknown-treated-as-fine gap the
+    # startup fix closed, reached via the ongoing event stream instead of
+    # the initial snapshot. Found by code review, not a live failure.
+    if state not in ("up", "down"):
+        return {"action": "invalid_link_state", "interface": name, "state": state}
+
     reconcile_expired_holddowns(held_down_until, interface_state, down_edges, now)
     interface_state[name] = state
 
@@ -477,6 +486,8 @@ def main():
                 held_down_seconds=HOLD_DOWN_SECONDS)
         elif action == "recovered":
             log("link_up_detected", interface=name)
+        elif action == "invalid_link_state":
+            log("invalid_link_state", interface=name, state=decision["state"])
         # "noop"/"ignored": no state change, nothing to log beyond the event
         # itself being a repeat notification OVSDB is allowed to send.
 
