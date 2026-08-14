@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pure-logic unit tests for daim_link_agent, independent of Mininet/OVS/OVSDB.
 
-Fifteen things are checked without a live network:
+Sixteen things are checked without a live network:
 1. `test_bfs_path_computation` -- the BFS-computed primary and alternate
    paths produce exactly the flow sets that were previously hand-written in
    stage3_link_recovery.py's install_primary()/install_alternate(), so the
@@ -66,7 +66,17 @@ Fifteen things are checked without a live network:
     event name and only advances the caller's `current_path` if every
     flow-mod call across withdraw and install actually succeeded; a
     partial failure is reported as `repair_incomplete` with `current_path`
-    left unchanged, instead of being silently reported as a clean repair."""
+    set to `None` (forwarding state no longer reliably known), not the
+    stale prior path, and a degraded `None` current_path does not crash a
+    subsequent repair attempt.
+16. `test_bfs_and_flows_use_declared_source_dest_not_hardcoded_host_names` --
+    `bfs_path()`/`path_to_flows()` resolve source/destination hosts from the
+    declared `SOURCE`/`DEST`/`HOST_ATTACHMENT` globals rather than the
+    literal strings `"h1"`/`"h2"` an earlier revision hardcoded -- both
+    topologies measured in this evidence set happen to use those names, so
+    this never surfaced live, but a deployment declaring different host
+    names via `load_topology_config()` would have hit a `KeyError` in
+    `path_to_flows()`."""
 import json
 import os
 
@@ -672,13 +682,22 @@ def test_apply_flow_routes_remote_bridge_through_adapter():
 
 def test_execute_repair_reports_partial_failure_honestly():
     """execute_repair() must not use the `repair_installed` event name, and
-    must not advance `current_path`, unless every flow-mod call across both
-    withdraw and install actually succeeded. An earlier revision (inline in
-    main()'s loop) called install_path()/withdraw_path() for their side
-    effects only, discarding apply_flow()'s per-call success/failure, and
-    unconditionally logged `repair_installed` and advanced `current_path`
-    regardless -- so a partial installation failure (a remote OVS instance
-    unreachable, a timeout) was silently reported as a clean repair."""
+    must not advance `current_path` to the attempted new path, unless every
+    flow-mod call across both withdraw and install actually succeeded. An
+    earlier revision (inline in main()'s loop) called
+    install_path()/withdraw_path() for their side effects only, discarding
+    apply_flow()'s per-call success/failure, and unconditionally logged
+    `repair_installed` and advanced `current_path` regardless -- so a
+    partial installation failure (a remote OVS instance unreachable, a
+    timeout) was silently reported as a clean repair.
+
+    On failure, `current_path` must become `None`, not the prior value
+    unchanged -- an earlier revision of this fix returned the prior
+    (pre-repair) path on failure, but `withdraw_path(current_path)` already
+    ran before `install_path()`, so a withdraw-succeeded/install-failed
+    outcome means the switches hold neither the old path nor the new one:
+    claiming the old path is still current is its own false claim, one a
+    later repair's `withdraw_path(current_path)` would act on incorrectly."""
     saved_apply_flow = daim_link_agent.apply_flow
     old_path = ["s1", "s2", "s4"]
     new_path = ["s1", "s3", "s4"]
@@ -695,10 +714,10 @@ def test_execute_repair_reports_partial_failure_honestly():
 
         daim_link_agent.apply_flow = failing_apply_flow
         result_path, event_name, fields = execute_repair(decision, old_path)
-        assert result_path == old_path, (
-            "current_path must NOT advance to the attempted new path when an "
-            "install call failed -- the caller must not believe the repair "
-            "succeeded when it did not"
+        assert result_path is None, (
+            "current_path must become None, not the stale prior path, when an "
+            "install call failed -- withdraw_path(current_path) already ran, "
+            "so the prior path is no longer known to be installed either"
         )
         assert event_name == "repair_incomplete", (
             "a partially-failed installation must be reported under a distinct "
@@ -706,12 +725,71 @@ def test_execute_repair_reports_partial_failure_honestly():
         )
         assert fields["install_ok"] is False
         assert fields["attempted_path"] == new_path
+        assert fields["prior_path"] == old_path
+
+        # A degraded current_path=None must not crash a subsequent repair
+        # attempt: withdraw_path(None) has nothing known to withdraw.
+        daim_link_agent.apply_flow = lambda action, bridge, arg: True
+        assert daim_link_agent.withdraw_path(None) is True
+        result_path, event_name, fields = execute_repair(decision, None)
+        assert result_path == new_path
+        assert event_name == "repair_installed"
     finally:
         daim_link_agent.apply_flow = saved_apply_flow
 
     print("daim_link_agent execute_repair failure-honesty regression test: PASS "
           "-- a partial installation failure is reported as repair_incomplete "
-          "with current_path left unchanged, not silently claimed as success.")
+          "with current_path set to None (not stale), and a degraded None "
+          "current_path does not crash a subsequent repair attempt.")
+
+
+def test_bfs_and_flows_use_declared_source_dest_not_hardcoded_host_names():
+    """bfs_path() and path_to_flows() must resolve source/destination hosts
+    from the declared SOURCE/DEST/HOST_ATTACHMENT globals, not the literal
+    strings "h1"/"h2" an earlier revision hardcoded -- both measured
+    topologies in this evidence set happen to name their hosts `h1`/`h2`, so
+    this defect never surfaced live, but load_topology_config() explicitly
+    allows a deployment to declare differently-named hosts (Section 4.4),
+    and the hardcoded version would have raised KeyError in path_to_flows()
+    the first time one did (`TOPOLOGY[switch]["h1"]` on a switch whose
+    topology dict has no "h1" key at all)."""
+    saved = (
+        dict(daim_link_agent.TOPOLOGY), dict(daim_link_agent.HOST_ATTACHMENT),
+        daim_link_agent.SOURCE, daim_link_agent.DEST,
+    )
+    try:
+        daim_link_agent.TOPOLOGY = {
+            "x1": {"alpha": (1, None), "x2": (2, 1)},
+            "x2": {"x1": (1, 2), "beta": (2, None)},
+        }
+        daim_link_agent.HOST_ATTACHMENT = {"alpha": "x1", "beta": "x2"}
+        daim_link_agent.SOURCE, daim_link_agent.DEST = "alpha", "beta"
+
+        path = bfs_path("alpha", "beta", down_edges=set())
+        assert path == ["x1", "x2"]
+        assert not any(node in daim_link_agent.HOST_ATTACHMENT for node in path), (
+            "a host node must never appear in a BFS-computed switch path"
+        )
+
+        flows = set(path_to_flows(path))
+        assert flows == {
+            ("x1", "priority=100,in_port=1,actions=output:2"),
+            ("x1", "priority=100,in_port=2,actions=output:1"),
+            ("x2", "priority=100,in_port=1,actions=output:2"),
+            ("x2", "priority=100,in_port=2,actions=output:1"),
+        }, (
+            "path_to_flows() must resolve the declared SOURCE/DEST ('alpha'/'beta') "
+            "to compute in_port/out_port, not crash or silently miscompute by "
+            "looking for hardcoded 'h1'/'h2' entries that do not exist for this "
+            "topology's switches"
+        )
+    finally:
+        daim_link_agent.TOPOLOGY, daim_link_agent.HOST_ATTACHMENT, \
+            daim_link_agent.SOURCE, daim_link_agent.DEST = saved
+
+    print("daim_link_agent SOURCE/DEST genericity regression test: PASS -- "
+          "bfs_path()/path_to_flows() work correctly for a topology whose "
+          "hosts are not named 'h1'/'h2', instead of assuming those literal names.")
 
 
 def main():
@@ -730,6 +808,7 @@ def main():
     test_multi_ovs_target_routing()
     test_apply_flow_routes_remote_bridge_through_adapter()
     test_execute_repair_reports_partial_failure_honestly()
+    test_bfs_and_flows_use_declared_source_dest_not_hardcoded_host_names()
 
 
 if __name__ == "__main__":

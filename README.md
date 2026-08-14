@@ -57,7 +57,7 @@ uses them.
   performs the actual OVSDB/adapter I/O. Hold-down state is keyed by physical
   edge (the frozenset of the two switches a link connects), not by interface
   name, since v0.3.0 (see below).
-- `network/test_daim_link_agent.py` — fifteen pure-logic unit tests, runnable
+- `network/test_daim_link_agent.py` — sixteen pure-logic unit tests, runnable
   with plain `python3` and no Mininet/OVS/OVSDB: (1) BFS path computation
   against hand-verified expected flow sets; (2) the hold-down state machine
   driven through a synthetic seven-transition flapping-link sequence, with
@@ -79,8 +79,12 @@ uses them.
   (14) confirming `apply_flow()` routes both local and remote bridges
   through the same `daim_ovs_flow` adapter binary; (15) confirming a
   partially-failed repair is reported as `repair_incomplete` with
-  `current_path` left unchanged, not silently claimed as success (v0.9.0,
-  see below).
+  `current_path` set to `None` (forwarding state no longer reliably known,
+  not a stale prior value) and that a degraded `None` current_path does not
+  crash a subsequent repair attempt (v0.9.0/v0.10.0); (16) confirming
+  `bfs_path()`/`path_to_flows()` resolve the declared `SOURCE`/`DEST`
+  rather than the hardcoded literal names `"h1"`/`"h2"` (v0.10.0, see
+  below).
 - `network/test_stage3_startup_already_down.py` — a regression test for a
   bug in the startup live-network harness itself (v0.6.0, see below), kept
   separate from `test_daim_link_agent.py` since it tests the harness, not
@@ -213,6 +217,50 @@ Two more findings from re-reading the v0.6.0 code and figures together:
   schedule is what actually demonstrates the BFS-call reduction; this live
   figure now says so explicitly instead of implying a reduction the live
   data never measured.
+
+## Safe degraded state and endpoint genericity, found by a second external review pass (v0.10.0)
+
+A second review pass over v0.9.0 -- reading the code, raw report, and figure together, not just the
+diff -- found two more real issues, neither requiring new live-network data (both fixes touch code
+paths the measured n=5 multi-OVS run never exercised: it never failed a repair, and both measured
+topologies name their hosts `h1`/`h2`), plus a real math error in the previous report's own
+cross-check.
+
+- **`execute_repair()`'s failure path was itself unsound.** v0.9.0 left `current_path` at its
+  pre-repair value on a partial failure. But `withdraw_path(current_path)` runs *before*
+  `install_path()`; if withdrawal succeeded and installation then failed, the switches hold neither
+  the old path nor the new one, so reporting the old path as still current is its own false claim --
+  a later repair's `withdraw_path(current_path)` would issue delete calls against flows that no
+  longer reflect reality. Fixed: `current_path` becomes `None` ("forwarding state not reliably
+  known") on any partial failure. `withdraw_path(None)` now treats that as nothing to withdraw
+  rather than crashing (`path_to_flows(None)` would otherwise raise `TypeError`), and
+  `decide_link_event`'s `new_path == current_path` no-op check naturally never matches `None`, so
+  the next fault event always attempts a fresh repair instead of trusting stale bookkeeping. This is
+  an interim safety fix, not the two-phase rollback protocol Section 5.2 of the manuscript
+  specifies -- it stops the agent from acting on a false belief about its own state, it does not
+  prevent or undo the mixed-flow-state risk itself.
+- **`bfs_path()`/`path_to_flows()` hardcoded the literal host names `"h1"`/`"h2"`** instead of
+  reading the declared `SOURCE`/`DEST`/`HOST_ATTACHMENT` globals `load_topology_config()` already
+  lets a deployment override. Both topologies measured in this evidence set happen to name their
+  hosts `h1`/`h2`, so this never surfaced live -- but a deployment declaring different host names
+  would have hit a `KeyError` in `path_to_flows()` (`TOPOLOGY[switch]["h1"]` on a switch whose
+  topology dict has no such key). Fixed to resolve both functions against the live globals; this is
+  a prerequisite for the multiple-topologies-and-scale evidence-gate item, not a gap in anything
+  currently measured.
+- **A real math error in the v0.9.0 report's own cross-check.** `STAGE3_MULTI_OVS_REPORT.md` claimed
+  the agent-reported repair-action time fell inside the independently-derived ping-outage bound "in
+  every repetition" -- false for repetition 5 (184.69 ms repair-action time vs. a 140-180 ms bound,
+  exceeding the upper limit by 4.69 ms). Not a data error -- the raw numbers were always correct, and
+  are unchanged -- a wording error in a summary claim about them, found by checking the table against
+  the prose rather than trusting the prose. Fixed: the report and manuscript now state 4-of-5, with
+  an explicit, honest reason the two measurements need not coincide exactly (`repair_end_ns` marks
+  control-plane flow-mod completion, not necessarily the same instant the data plane resumes
+  forwarding in both directions) rather than treating the mismatch as a discrepancy to explain away
+  or silently correcting the claim to fit.
+
+Two new unit tests (`test_execute_repair_reports_partial_failure_honestly` updated,
+`test_bfs_and_flows_use_declared_source_dest_not_hardcoded_host_names` new): 16/16 agent tests pass
+(18/18 including the two harness-parser tests in the separate file).
 
 ## Adapter unification and failure-honesty fix, found by external review (v0.9.0)
 

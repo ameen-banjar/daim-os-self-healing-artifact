@@ -236,13 +236,24 @@ next successful one: the true outage duration `T` satisfies
 For `Δ=20 ms` and the gaps observed here (8-10 missing packets), that is a
 range of roughly 140-220 ms depending on the repetition (see the table's
 "Outage bound" column) -- consistent with, but not a tight independent
-confirmation of, the agent-reported repair-action times (184.7-198.5 ms),
-which fall inside every repetition's bound. This is real, independently-
-collected evidence that the reported repair timing corresponds to an
-actual, measurable interruption in the end-to-end data path of a
-plausible magnitude, not only an internal log timestamp -- but it should
-be read as a consistency check against a wide bound, not a precise
-independent measurement of the outage. A future revision should instrument
+confirmation of, the agent-reported repair-action times (184.7-198.5 ms).
+The repair-action time falls inside the bound in four of the five
+repetitions; in repetition 5 it exceeds the bound's nominal upper limit
+(180 ms) by 4.69 ms, under a quarter of one probe interval. This is not a
+discrepancy to explain away: `repair_end_ns` marks completion of every
+control-plane flow-mod call the repair requires, which need not be the
+same instant the data plane resumes forwarding in both directions -- a
+probe reply can plausibly return before the very last (e.g.
+reverse-direction or cleanup) flow-mod commits. The two measurements are
+independently collected and show coarse temporal consistency across all
+five repetitions, but they measure two related, not identical, endpoints,
+and repetition 5's near-miss is reported rather than smoothed over. This is
+real, independently-collected evidence that the reported repair timing
+corresponds to an actual, measurable interruption in the end-to-end data
+path of a plausible magnitude, not only an internal log timestamp -- but it
+should be read as a consistency check against a wide bound, not a precise
+independent measurement of the outage, and not proof the two quantities
+must coincide. A future revision should instrument
 `t_last_success_before_failure`/`t_first_success_after_failure` directly
 (e.g. via timestamped packet capture) for a genuine independent
 service-restoration measurement, per Section 10's item on decomposing

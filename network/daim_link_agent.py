@@ -140,7 +140,16 @@ def log(event, **fields):
 def bfs_path(source, dest, down_edges):
     """Returns a list of switch names from the switch attached to `source`
     to the switch attached to `dest`, or None if no such path avoids
-    down_edges. `source`/`dest` are host names (keys of HOST_ATTACHMENT)."""
+    down_edges. `source`/`dest` are host names (keys of HOST_ATTACHMENT).
+    Neighbours that are themselves hosts (checked against HOST_ATTACHMENT,
+    not the literal names "h1"/"h2" an earlier revision hardcoded here) are
+    skipped -- BFS only walks switch-to-switch edges, since TOPOLOGY's
+    per-switch adjacency dict includes the switch's own attached host as a
+    neighbour alongside its switch neighbours. Deployments declaring
+    differently-named hosts via load_topology_config() (none of the
+    topologies measured in this paper do -- both use `h1`/`h2`) now resolve
+    correctly instead of silently walking through a host as if it were a
+    transit switch."""
     start, goal = HOST_ATTACHMENT[source], HOST_ATTACHMENT[dest]
     q = deque([[start]])
     seen = {start}
@@ -150,7 +159,7 @@ def bfs_path(source, dest, down_edges):
         if node == goal:
             return path
         for neighbor in TOPOLOGY.get(node, {}):
-            if neighbor in ("h1", "h2"):
+            if neighbor in HOST_ATTACHMENT:
                 continue
             edge = frozenset({node, neighbor})
             if edge in down_edges or neighbor in seen:
@@ -161,8 +170,14 @@ def bfs_path(source, dest, down_edges):
 
 
 def path_to_flows(path):
+    """Translates a switch path into per-switch flow rules, walking from the
+    declared SOURCE host to the declared DEST host -- reads these as module
+    globals at call time (like REMOTE_ENDPOINTS elsewhere in this file) so a
+    deployment that overrides them via load_topology_config() is honoured;
+    an earlier revision hardcoded the literal host names "h1"/"h2" here
+    instead."""
     flows = []
-    hops = ["h1"] + path + ["h2"]
+    hops = [SOURCE] + path + [DEST]
     for i in range(1, len(hops) - 1):
         switch, prev_node, next_node = hops[i], hops[i - 1], hops[i + 1]
         in_port = TOPOLOGY[switch][prev_node][0]
@@ -220,7 +235,14 @@ def install_path(path):
 
 
 def withdraw_path(path):
-    """Returns True only if every flow-delete call for `path` succeeded."""
+    """Returns True only if every flow-delete call for `path` succeeded.
+    `path=None` -- the agent's forwarding-state bookkeeping is unknown
+    following a prior partial-failure repair, see `execute_repair()` -- is
+    treated as nothing to withdraw and returns True vacuously: there is no
+    known path to issue delete calls against, and guessing would risk
+    deleting flows a different, unrelated repair installed."""
+    if path is None:
+        return True
     ok = True
     for bridge, flow in path_to_flows(path):
         # del-flows match syntax does not accept "priority=..."; strip it,
@@ -235,21 +257,35 @@ def execute_repair(decision, current_path):
     """Executes the I/O for a "repair" decision: withdraws the old path,
     installs the new one, and reports what actually happened -- it does NOT
     claim success (does not use the `repair_installed` event name, does not
-    advance the caller's `current_path`) unless every flow add/delete call
-    across both withdraw and install actually succeeded. An earlier revision
-    of this logic (inline in main()'s loop) called `install_path()` and
-    `withdraw_path()` for their side effects only, discarding whether any
-    individual `apply_flow()` call failed, then unconditionally logged
-    `repair_installed` and advanced `current_path` regardless -- so a
-    partially-failed installation (a remote OVS instance unreachable, a
-    timeout, a rejected flow) was silently reported as a clean repair, with
-    nothing in the log distinguishing it from a real one. This does not
-    implement the two-phase staged/commit/rollback protocol Section 5.2
-    specifies -- flows that DID succeed before a failure are not undone, and
-    the network can still be left in a mixed old/new state exactly as
-    Section 4.6 already documents -- it only stops the agent from claiming a
-    success it did not achieve. Returns (new_current_path, event_name,
-    event_fields) for the caller to log."""
+    advance the caller's `current_path` to the new path) unless every flow
+    add/delete call across both withdraw and install actually succeeded. An
+    earlier revision of this logic (inline in main()'s loop) called
+    `install_path()` and `withdraw_path()` for their side effects only,
+    discarding whether any individual `apply_flow()` call failed, then
+    unconditionally logged `repair_installed` and advanced `current_path`
+    regardless -- so a partially-failed installation (a remote OVS instance
+    unreachable, a timeout, a rejected flow) was silently reported as a
+    clean repair, with nothing in the log distinguishing it from a real one.
+
+    On any failure, the returned `current_path` is `None`, not the prior
+    `current_path` value -- an earlier revision of *this* fix returned the
+    prior value unchanged, which is itself unsound: `withdraw_path(current_path)`
+    already ran before `install_path()`, so if withdrawal succeeded but
+    installation then failed, the switches no longer hold the old path
+    either, and reporting the old path as still current would let a later
+    repair's `withdraw_path(current_path)` issue delete calls against flows
+    that no longer reflect reality. `None` means "forwarding state is not
+    reliably known"; `withdraw_path(None)` (above) treats that as nothing to
+    withdraw rather than crashing or guessing, and `decide_link_event`'s
+    `new_path == current_path` no-op check naturally never matches `None`,
+    so the next fault event always attempts a fresh repair instead of
+    silently trusting stale bookkeeping. This still does not implement the
+    two-phase staged/commit/rollback protocol Section 5.2 specifies -- flows
+    that DID succeed before a failure are not undone, and the network can
+    still be left in a mixed old/new state exactly as Section 4.6 already
+    documents -- it only stops the agent from claiming, or continuing to
+    rely on, a success it did not achieve. Returns (new_current_path,
+    event_name, event_fields) for the caller to log."""
     repair_start_ns = time.perf_counter_ns()
     withdraw_ok = withdraw_path(current_path)
     install_ok = install_path(decision["new_path"])
@@ -260,8 +296,8 @@ def execute_repair(decision, current_path):
             "repair_start_ns": repair_start_ns, "repair_end_ns": repair_end_ns,
             "held_down_seconds": HOLD_DOWN_SECONDS,
         }
-    return current_path, "repair_incomplete", {
-        "attempted_path": decision["new_path"], "path": current_path,
+    return None, "repair_incomplete", {
+        "attempted_path": decision["new_path"], "prior_path": current_path,
         "withdraw_ok": withdraw_ok, "install_ok": install_ok,
         "repair_start_ns": repair_start_ns, "repair_end_ns": repair_end_ns,
     }

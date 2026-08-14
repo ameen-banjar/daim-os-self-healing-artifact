@@ -6,10 +6,11 @@ authors:
   - family-names: Banjar
     given-names: Ameen
     orcid: "https://orcid.org/0000-0002-0871-5153"
-version: 0.9.0
+version: 0.10.0
 date-released: 2026-08-15
 license: Apache-2.0
-doi: 10.5281/zenodo.21940478
+# doi: TODO -- fill in the v0.10.0 version-specific DOI once this tag's
+# release is minted by Zenodo. v0.9.0 DOI: 10.5281/zenodo.21940478.
 # v0.8.0 DOI: 10.5281/zenodo.21939224. v0.7.0 DOI: 10.5281/zenodo.21924978.
 # v0.6.0 DOI: 10.5281/zenodo.21918394. v0.5.0 DOI: 10.5281/zenodo.21912414.
 # v0.4.0 DOI: 10.5281/zenodo.21910227. v0.3.0 DOI: 10.5281/zenodo.21909633.
@@ -83,12 +84,32 @@ abstract: >-
   process-spawn hop the adapter path adds), independently bounded by the
   packet-loss gap in the concurrent probe traffic (an independent process
   in the agent's own VM, not a different host -- corrected from an earlier,
-  imprecise description). Contains pure-logic
+  imprecise description). v0.10.0 fixes a second review pass's two further
+  findings, neither requiring new live-network data: execute_repair()'s own
+  failure path was itself unsound, since withdraw_path(current_path) runs
+  before install_path(), so a withdraw-succeeded/install-failed outcome
+  means neither the old nor the new path is actually installed -- reporting
+  the old path as still current (v0.9.0's behaviour) was its own false
+  claim; current_path now becomes None on any partial failure, with
+  withdraw_path(None) and a subsequent repair attempt from None both
+  handled safely without crashing. Separately, bfs_path()/path_to_flows()
+  hardcoded the literal host names "h1"/"h2" instead of the declared
+  SOURCE/DEST/HOST_ATTACHMENT globals load_topology_config() already allows
+  overriding; harmless for both topologies measured here (both use
+  h1/h2) but would have raised KeyError for a differently-named-host
+  deployment, so this is a prerequisite for future multi-topology work,
+  fixed now. This same pass also corrected a real math error in the
+  v0.9.0 report's own cross-check, which claimed the agent-reported
+  repair-action time fell inside the independent ping-outage bound in
+  every repetition -- false for repetition 5 by 4.69 ms, now stated
+  correctly as 4-of-5 with an honest explanation (repair_end_ns marks
+  control-plane completion, not necessarily the same instant as data-plane
+  restoration). Contains pure-logic
   unit tests for the path computation and all hold-down/startup behaviours
   (suppression, stale-state reconciliation, cross-interface coverage,
   edge-confirmation, startup synchronization, link_state validation at both
   startup and runtime, multi-OVS target routing, adapter unification,
-  partial-failure honesty), all
+  partial-failure honesty, endpoint genericity), all
   runnable without Mininet/OVS; live-network flapping-link,
   startup-already-down, and multi-OVS-deployment scripts and their raw data
   and event logs across every pre-fix and post-fix run, retained side by
