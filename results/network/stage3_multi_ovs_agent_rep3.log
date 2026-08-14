@@ -1,0 +1,25 @@
+{"ts": 1786718922.6159408, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "priority=100,in_port=1,actions=output:2"}
+{"ts": 1786718922.6245883, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "priority=100,in_port=2,actions=output:1"}
+{"ts": 1786718922.6332214, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "priority=100,in_port=3,actions=output:1"}
+{"ts": 1786718922.647903, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "priority=100,in_port=1,actions=output:3"}
+{"ts": 1786718922.664999, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "priority=100,in_port=1,actions=output:3"}
+{"ts": 1786718922.6797955, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "priority=100,in_port=3,actions=output:1"}
+{"ts": 1786718922.6967893, "event": "agent_started", "initial_path": ["s1", "s3", "s4"], "down_edges": []}
+{"ts": 1786718932.1915507, "event": "link_down_detected", "interface": "s4-eth1", "edge": ["s3", "s4"], "ns": 20959910888885}
+{"ts": 1786718932.1916034, "event": "flow_start", "action": "delete", "bridge": "s1", "arg": "in_port=1"}
+{"ts": 1786718932.203246, "event": "flow_start", "action": "delete", "bridge": "s1", "arg": "in_port=2"}
+{"ts": 1786718932.21272, "event": "flow_start", "action": "delete", "bridge": "s3", "arg": "in_port=3"}
+{"ts": 1786718932.227104, "event": "flow_start", "action": "delete", "bridge": "s3", "arg": "in_port=1"}
+{"ts": 1786718932.2408748, "event": "flow_start", "action": "delete", "bridge": "s4", "arg": "in_port=1"}
+{"ts": 1786718932.2574253, "event": "flow_start", "action": "delete", "bridge": "s4", "arg": "in_port=3"}
+{"ts": 1786718932.272049, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "priority=100,in_port=1,actions=output:2"}
+{"ts": 1786718932.2811925, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "priority=100,in_port=2,actions=output:1"}
+{"ts": 1786718932.290109, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "priority=100,in_port=3,actions=output:2"}
+{"ts": 1786718932.3060663, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "priority=100,in_port=2,actions=output:3"}
+{"ts": 1786718932.3196301, "event": "flow_start", "action": "add", "bridge": "s5", "arg": "priority=100,in_port=1,actions=output:2"}
+{"ts": 1786718932.3349082, "event": "flow_start", "action": "add", "bridge": "s5", "arg": "priority=100,in_port=2,actions=output:1"}
+{"ts": 1786718932.348427, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "priority=100,in_port=2,actions=output:3"}
+{"ts": 1786718932.3636265, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "priority=100,in_port=3,actions=output:2"}
+{"ts": 1786718932.376891, "event": "repair_installed", "path": ["s1", "s3", "s5", "s4"], "repair_start_ns": 20959910953095, "repair_end_ns": 20960096247254, "held_down_seconds": 2.0}
+{"ts": 1786718932.37693, "event": "transition_suppressed", "interface": "s3-eth1", "state": "down", "remaining_s": 1.814608381002472}
+2026-08-14T14:48:57Z|00001|fatal_signal|WARN|terminating with signal 15 (Terminated)

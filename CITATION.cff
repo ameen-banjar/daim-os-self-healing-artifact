@@ -6,10 +6,11 @@ authors:
   - family-names: Banjar
     given-names: Ameen
     orcid: "https://orcid.org/0000-0002-0871-5153"
-version: 0.7.0
-date-released: 2026-08-13
+version: 0.8.0
+date-released: 2026-08-14
 license: Apache-2.0
-doi: 10.5281/zenodo.21924978
+# doi: TODO -- fill in the v0.8.0 version-specific DOI once this tag's
+# release is minted by Zenodo. v0.7.0 DOI: 10.5281/zenodo.21924978.
 # v0.6.0 DOI: 10.5281/zenodo.21918394. v0.5.0 DOI: 10.5281/zenodo.21912414.
 # v0.4.0 DOI: 10.5281/zenodo.21910227. v0.3.0 DOI: 10.5281/zenodo.21909633.
 # v0.1.0 DOI: 10.5281/zenodo.21906993.
@@ -59,17 +60,27 @@ abstract: >-
   non-suppressed action including "recovered", which never calls BFS, so it
   reported 4-to-2 when the real count (repair/noop/repair_failed only) is
   1-to-1 for this specific live schedule -- the BFS-call-reduction claim is
-  Figure 5's logic-level result, not this live figure's. Contains pure-logic
+  Figure 5's logic-level result, not this live figure's. v0.8.0 adds
+  multi-OVS connection multiplexing and per-hop flow routing
+  (REMOTE_ENDPOINTS, load_topology_config(), select()-based multiplexing of
+  multiple ovsdb-client monitor connections in monitor_link_rows()), measured
+  against a real two-VM testbed joined by a GRE tunnel: a remote-edge
+  failure -- on switches the agent shares no local OVSDB connection with --
+  was correctly detected and repaired across five repetitions (mean
+  repair-action time 185.75 ms), independently corroborated by the
+  packet-loss gap observed in the concurrent probe traffic on a different
+  host. Contains pure-logic
   unit tests for the path computation and all hold-down/startup behaviours
   (suppression, stale-state reconciliation, cross-interface coverage,
   edge-confirmation, startup synchronization, link_state validation at both
-  startup and runtime), all
-  runnable without Mininet/OVS; live-network flapping-link and
-  startup-already-down scripts and their raw data and event logs across every
-  pre-fix and post-fix run, retained side by side; the network-level Stage 3
-  raw data (five autonomous link-failure repetitions, plus scripted
-  non-autonomous switch/controller-failure conditions) and reports; and the
-  figure-generation script and resulting figures used in the manuscript.
+  startup and runtime, multi-OVS target routing), all
+  runnable without Mininet/OVS; live-network flapping-link,
+  startup-already-down, and multi-OVS-deployment scripts and their raw data
+  and event logs across every pre-fix and post-fix run, retained side by
+  side; the network-level Stage 3 raw data (five autonomous link-failure
+  repetitions, plus scripted non-autonomous switch/controller-failure
+  conditions) and reports; and the figure-generation script and resulting
+  figures used in the manuscript.
 keywords:
   - software-defined networking
   - self-healing networks

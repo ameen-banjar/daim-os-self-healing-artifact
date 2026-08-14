@@ -28,6 +28,7 @@ FLAP_RAW = ROOT / "results/network/stage3_holddown_flapping_raw.csv"
 FLAP_RAW_PRE_FIX = ROOT / "results/network/stage3_holddown_flapping_raw_pre_edgefix.csv"
 STARTUP_RESULT = ROOT / "results/network/stage3_startup_already_down_result.json"
 STARTUP_RESULT_PRE_FIX = ROOT / "results/network/stage3_startup_already_down_result_pre_fix.json"
+MULTI_OVS_RAW = ROOT / "results/network/stage3_multi_ovs_raw.csv"
 OUT = ROOT / "results/paper3"
 OUT.mkdir(parents=True, exist_ok=True)
 
@@ -626,6 +627,123 @@ def draw_startup_comparison(path):
     image.save(path)
 
 
+# ------------------------------------------------------------- Figure 8 ----
+
+def draw_multi_ovs_deployment(path):
+    rows = _read_flap_csv(MULTI_OVS_RAW)
+    repair = [float(r["repair_action_ms"]) for r in rows]
+    gap = [float(r["ping_gap_lower_bound_ms"]) for r in rows]
+    mean_repair = sum(repair) / len(repair)
+
+    width, height = 1750, 1300
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+    title_font = ImageFont.load_default(size=44)
+    font = ImageFont.load_default(size=34)
+    small = ImageFont.load_default(size=28)
+    tiny = ImageFont.load_default(size=25)
+
+    draw.text((24, 24), "Multi-OVS deployment: remote-edge failure", fill="#111111", font=title_font)
+    draw.text(
+        (24, 78),
+        "across two independent OVS instances joined by a real GRE tunnel (n=5)",
+        fill="#666666", font=small,
+    )
+
+    # -- mini topology: VM1 (agent + s1) -- GRE -- VM2 (s3, s4, s5, h2) -----
+    diag_top = 150
+    vm1_x, vm2_x = 90, 940
+    vm_w, vm_h = 600, 320
+    for vx, label, sub in (
+        (vm1_x, "VM1 (daim-lab)", "agent + ovsdb-server"),
+        (vm2_x, "VM2 (daim-lab-2)", "ovsdb-server (remote to agent)"),
+    ):
+        draw.rectangle((vx, diag_top, vx + vm_w, diag_top + vm_h), outline="#333333", width=3)
+        draw.text((vx + 20, diag_top + 14), label, fill="#111111", font=font)
+        draw.text((vx + 20, diag_top + 56), sub, fill="#888888", font=tiny)
+
+    row_y = diag_top + 180
+    h1 = sized_box(draw, vm1_x + 90, row_y, "h1", font, pad_x=26, pad_y=20)
+    s1 = sized_box(draw, vm1_x + 330, row_y, "s1\n(agent-local)", font, pad_x=26, pad_y=20)
+    s3 = sized_box(draw, vm2_x + 90, row_y, "s3", font, pad_x=26, pad_y=20)
+    s4 = sized_box(draw, vm2_x + 470, row_y, "s4", font, pad_x=26, pad_y=20, outline="#D55E00")
+    s5 = sized_box(draw, vm2_x + 280, row_y + 130, "s5", font, pad_x=26, pad_y=20)
+    h2 = sized_box(draw, vm2_x + 560, row_y, "h2", font, pad_x=26, pad_y=20)
+
+    def mid_left(b):
+        return (b[0], (b[1] + b[3]) // 2)
+
+    def mid_right(b):
+        return (b[2], (b[1] + b[3]) // 2)
+
+    def mid_top(b):
+        return ((b[0] + b[2]) // 2, b[1])
+
+    def mid_bottom(b):
+        return ((b[0] + b[2]) // 2, b[3])
+
+    styled_segment(draw, mid_right(h1), mid_left(s1), "solid", 4, "#333333")
+    styled_segment(draw, mid_right(s1), mid_left(s3), "solid", 5, "#0072B2")
+    draw.text(((s1[2] + s3[0]) // 2 - 32, row_y - 44), "GRE", fill="#0072B2", font=tiny)
+    styled_segment(draw, mid_right(s3), mid_left(s4), "solid", 7, "#D55E00")
+    draw.text(((s3[2] + s4[0]) // 2 - 90, row_y - 44), "injected failure", fill="#D55E00", font=tiny)
+    styled_segment(draw, mid_bottom(s3), mid_left(s5), "dashed", 4, "#0072B2")
+    styled_segment(draw, mid_right(s5), mid_bottom(s4), "dashed", 4, "#0072B2")
+    styled_segment(draw, mid_right(s4), mid_left(h2), "solid", 4, "#333333")
+
+    draw.text(
+        (24, diag_top + vm_h + 20),
+        "Both s3-eth1 and s4-eth1 (the s3-s4 edge, solid red) fail on VM2, entirely outside the agent's\n"
+        "local OVSDB connection; detection and repair (path s1-s3-s5-s4, dashed blue) both cross the\n"
+        "GRE/TCP link to VM2.",
+        fill="#333333", font=small,
+    )
+
+    # -- per-repetition timing bars ------------------------------------------
+    legend_y = diag_top + vm_h + 150
+    draw.rectangle((24, legend_y, 48, legend_y + 24), fill="#0072B2")
+    draw.text((56, legend_y), f"agent repair-action time (repair_start_ns to repair_end_ns); mean {mean_repair:.1f} ms shown as horizontal line", fill="#222222", font=tiny)
+    draw.rectangle((24, legend_y + 36, 48, legend_y + 60), fill="#D55E00")
+    draw.text((56, legend_y + 36), "independent ping-gap lower bound (icmp_seq gap x 20 ms)", fill="#222222", font=tiny)
+
+    chart_top = legend_y + 110
+    chart_left = 140
+    chart_w = 1500
+    chart_h = 340
+    max_val = max(repair + gap) * 1.2
+    n = len(rows)
+    group_w = chart_w / n
+    bar_w = 70
+
+    draw.line((chart_left, chart_top, chart_left, chart_top + chart_h), fill="#333333", width=3)
+    draw.line((chart_left, chart_top + chart_h, chart_left + chart_w, chart_top + chart_h), fill="#333333", width=3)
+    draw.text((24, chart_top - 6), "ms", fill="#666666", font=tiny)
+
+    for i, (r, g) in enumerate(zip(repair, gap)):
+        gx = chart_left + i * group_w + group_w / 2
+        r_h = int(chart_h * r / max_val)
+        g_h = int(chart_h * g / max_val)
+        rx0 = gx - bar_w - 6
+        gx0 = gx + 6
+        draw.rectangle((rx0, chart_top + chart_h - r_h, rx0 + bar_w, chart_top + chart_h), fill="#0072B2")
+        draw.rectangle((gx0, chart_top + chart_h - g_h, gx0 + bar_w, chart_top + chart_h), fill="#D55E00")
+        draw.text((rx0 - 4, chart_top + chart_h - r_h - 34), f"{r:.0f}", fill="#0072B2", font=tiny)
+        draw.text((gx0 - 4, chart_top + chart_h - g_h - 34), f"{g:.0f}", fill="#D55E00", font=tiny)
+        draw.text((gx - 26, chart_top + chart_h + 14), f"rep {i+1}", fill="#333333", font=tiny)
+
+    mean_y = chart_top + chart_h - int(chart_h * mean_repair / max_val)
+    draw.line((chart_left, mean_y, chart_left + chart_w, mean_y), fill="#0072B2", width=2)
+
+    draw.text(
+        (24, chart_top + chart_h + 60),
+        "Ping-gap values are read from the concurrent probe's own icmp_seq numbers, not from the agent's log --\n"
+        "an independent, packet-level confirmation that the reported repair timing corresponds to a real,\n"
+        "measurable data-plane interruption, not only an internal timestamp.",
+        fill="#666666", font=small,
+    )
+    image.save(path)
+
+
 def main():
     draw_architecture(OUT / "paper3_architecture.png")
     draw_sequence(OUT / "paper3_sequence.png")
@@ -634,10 +752,12 @@ def main():
     draw_holddown_timeline(OUT / "paper3_holddown_timeline.png")
     draw_live_holddown_comparison(OUT / "paper3_holddown_live_comparison.png")
     draw_startup_comparison(OUT / "paper3_startup_comparison.png")
+    draw_multi_ovs_deployment(OUT / "paper3_multi_ovs_deployment.png")
     print("Wrote:")
     for name in ("paper3_architecture.png", "paper3_sequence.png", "paper3_topology.png",
                  "paper3_recovery_timeline.png", "paper3_holddown_timeline.png",
-                 "paper3_holddown_live_comparison.png", "paper3_startup_comparison.png"):
+                 "paper3_holddown_live_comparison.png", "paper3_startup_comparison.png",
+                 "paper3_multi_ovs_deployment.png"):
         print(" ", OUT / name)
 
 

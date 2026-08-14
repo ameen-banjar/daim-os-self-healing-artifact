@@ -53,6 +53,7 @@ Eleven things are checked without a live network:
 import json
 import os
 
+import daim_link_agent
 from daim_link_agent import (
     MONITORED_INTERFACES,
     bfs_path,
@@ -61,6 +62,9 @@ from daim_link_agent import (
     path_to_flows,
     read_initial_snapshot,
     reconcile_expired_holddowns,
+    _monitored_ovsdb_targets,
+    _ovsdb_target_for_interface,
+    _owning_switch,
     _parse_monitor_line,
     SOURCE,
     DEST,
@@ -542,6 +546,67 @@ def test_decide_link_event_rejects_unexpected_link_state():
           "of silently treating it as 'ignored'.")
 
 
+def test_default_config_uses_single_local_ovsdb_target():
+    """The default configuration (empty REMOTE_ENDPOINTS, the single-host
+    diamond every other experiment in this evidence set measures) must
+    resolve to exactly one local monitor target -- confirms the multi-OVS
+    connection-multiplexing machinery is fully inert unless a deployment
+    opts into it, so every existing experiment's behaviour is unaffected by
+    this capability existing."""
+    assert daim_link_agent.REMOTE_ENDPOINTS == {}
+    assert _monitored_ovsdb_targets() == [None]
+    for name in MONITORED_INTERFACES:
+        assert _ovsdb_target_for_interface(name) is None, name
+
+    print("daim_link_agent default-config multi-OVS inertness regression "
+          "test: PASS -- an empty REMOTE_ENDPOINTS resolves to exactly one "
+          "local monitor target, matching every single-host experiment.")
+
+
+def test_multi_ovs_target_routing():
+    """With a non-empty REMOTE_ENDPOINTS (as the live multi-OVS deployment
+    in Section 7.7 uses), _monitored_ovsdb_targets() must return one entry
+    per distinct OVSDB endpoint actually referenced by MONITORED_INTERFACES,
+    and _ovsdb_target_for_interface() must route each interface to its own
+    switch's endpoint -- the per-hop routing logic Section 8.3 requires,
+    exercised here without needing a live multi-VM testbed."""
+    saved_endpoints = dict(daim_link_agent.REMOTE_ENDPOINTS)
+    saved_monitored = dict(daim_link_agent.MONITORED_INTERFACES)
+    try:
+        daim_link_agent.REMOTE_ENDPOINTS = {
+            "s3": {"ovsdb": "tcp:192.0.2.2:6640", "openflow": "tcp:192.0.2.2:6634"},
+            "s4": {"ovsdb": "tcp:192.0.2.2:6640", "openflow": "tcp:192.0.2.2:6635"},
+        }
+        daim_link_agent.MONITORED_INTERFACES = {
+            "s3-eth1": ("s3", "s4"),
+            "s4-eth1": ("s3", "s4"),
+        }
+        assert _owning_switch("s3-eth1") == "s3"
+        assert _ovsdb_target_for_interface("s3-eth1") == "tcp:192.0.2.2:6640"
+        assert _ovsdb_target_for_interface("s4-eth1") == "tcp:192.0.2.2:6640"
+        # Both interfaces share the same remote OVSDB endpoint here, so only
+        # one connection is needed to observe both -- not one per interface.
+        assert _monitored_ovsdb_targets() == ["tcp:192.0.2.2:6640"]
+
+        daim_link_agent.MONITORED_INTERFACES = {
+            "s1-eth2": ("s1", "s2"),
+            "s2-eth1": ("s1", "s2"),
+            "s3-eth1": ("s3", "s4"),
+            "s4-eth1": ("s3", "s4"),
+        }
+        assert _monitored_ovsdb_targets() == [None, "tcp:192.0.2.2:6640"], (
+            "a deployment spanning both a local edge and a remote edge must "
+            "open exactly two connections: one local, one remote"
+        )
+    finally:
+        daim_link_agent.REMOTE_ENDPOINTS = saved_endpoints
+        daim_link_agent.MONITORED_INTERFACES = saved_monitored
+
+    print("daim_link_agent multi-OVS target-routing regression test: PASS "
+          "-- interfaces route to their own switch's registered remote "
+          "endpoint, and connections are deduplicated per distinct target.")
+
+
 def main():
     test_bfs_path_computation()
     test_holddown_suppresses_flapping()
@@ -554,6 +619,8 @@ def main():
     test_startup_detects_already_down_edge()
     test_startup_rejects_unexpected_link_state()
     test_decide_link_event_rejects_unexpected_link_state()
+    test_default_config_uses_single_local_ovsdb_target()
+    test_multi_ovs_target_routing()
 
 
 if __name__ == "__main__":

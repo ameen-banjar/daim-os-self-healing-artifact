@@ -18,6 +18,7 @@ is declared, not discovered via LLDP or the DAIM_LINK_TABLE. Extending this
 to live topology discovery is a separate increment.
 """
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -25,7 +26,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-_monitor_proc = None
+_monitor_procs = []
 
 
 def _terminate_monitor_and_exit(*_args):
@@ -33,9 +34,13 @@ def _terminate_monitor_and_exit(*_args):
     process that outlives a plain process exit (it is not killed by the
     parent dying), so without this it leaks as an orphan still attached to
     ovsdb-server -- confirmed during testing by dozens of accumulated
-    `ovsdb-client monitor` processes across repeated experiment runs."""
-    if _monitor_proc is not None and _monitor_proc.poll() is None:
-        _monitor_proc.terminate()
+    `ovsdb-client monitor` processes across repeated experiment runs. A
+    multi-OVS deployment (REMOTE_ENDPOINTS non-empty) can have more than one
+    such subscription open at once -- one per distinct OVSDB endpoint -- so
+    this terminates all of them, not just one."""
+    for proc in _monitor_procs:
+        if proc.poll() is None:
+            proc.terminate()
     sys.exit(0)
 
 
@@ -55,26 +60,75 @@ TOPOLOGY = {
 HOST_ATTACHMENT = {"h1": "s1", "h2": "s4"}
 SOURCE, DEST = "h1", "h2"
 
-# Hold-down window (seconds) started on a monitored interface after a repair
-# it triggered completes. Further link_state transitions on that interface
-# are suppressed until the window elapses, so a flapping link causes one
-# repair, not one repair per flap. Overridable per-call for testing.
-HOLD_DOWN_SECONDS = 2.0
-
 # OVS interface name -> the topology edge it belongs to.
 MONITORED_INTERFACES = {
     "s1-eth2": ("s1", "s2"),
     "s2-eth1": ("s1", "s2"),
 }
 
-# edge -> the set of monitored interface names that observe it. A physical
-# link has two independently-reporting OVS interfaces; an edge is only
-# confirmed recovered once every interface that observes it has reported
-# `up` (see _edge_confirmed_up below).
-EDGE_INTERFACES = {}
-for _name, (_a, _b) in MONITORED_INTERFACES.items():
-    EDGE_INTERFACES.setdefault(frozenset({_a, _b}), set()).add(_name)
-del _name, _a, _b
+# switch -> {"ovsdb": <ovsdb-client target>, "openflow": <ovs-ofctl target>}
+# for a switch that lives on an OVS instance other than the agent's local
+# one. A switch absent from this dict is local: monitored via the agent's
+# own default ovsdb-client connection, and controlled via the local
+# daim_ovs_flow CLI exactly as in every single-host deployment measured so
+# far. Empty by default -- this is the single-shared-OVSDB deployment every
+# other experiment in this evidence set uses; set DAIM_TOPOLOGY_CONFIG to a
+# JSON file (see load_topology_config below) to point at a real multi-OVS
+# testbed instead, without changing this file's behaviour when unset.
+REMOTE_ENDPOINTS = {}
+
+
+def load_topology_config(path):
+    """Overrides TOPOLOGY/HOST_ATTACHMENT/SOURCE/DEST/MONITORED_INTERFACES/
+    REMOTE_ENDPOINTS from a JSON file, for deployments (like the multi-OVS
+    experiment in Section 7.7 of the manuscript) that need a different
+    topology and a non-empty REMOTE_ENDPOINTS than the single-host diamond
+    hardcoded above. Deliberately opt-in via the DAIM_TOPOLOGY_CONFIG
+    environment variable rather than always reading a config file, so every
+    existing test and single-host experiment keeps working unchanged with
+    no config file present -- this is additive, not a replacement for the
+    default configuration."""
+    global TOPOLOGY, HOST_ATTACHMENT, SOURCE, DEST, MONITORED_INTERFACES, REMOTE_ENDPOINTS
+    with open(path) as f:
+        config = json.load(f)
+    TOPOLOGY = {
+        switch: {neighbor: tuple(ports) for neighbor, ports in neighbors.items()}
+        for switch, neighbors in config["topology"].items()
+    }
+    HOST_ATTACHMENT = config["host_attachment"]
+    SOURCE, DEST = config["source"], config["dest"]
+    MONITORED_INTERFACES = {
+        name: tuple(edge) for name, edge in config["monitored_interfaces"].items()
+    }
+    REMOTE_ENDPOINTS = config.get("remote_endpoints", {})
+
+
+_config_path = os.environ.get("DAIM_TOPOLOGY_CONFIG")
+if _config_path:
+    load_topology_config(_config_path)
+del _config_path
+
+# Hold-down window (seconds) started on a monitored interface after a repair
+# it triggered completes. Further link_state transitions on that interface
+# are suppressed until the window elapses, so a flapping link causes one
+# repair, not one repair per flap. Overridable per-call for testing.
+HOLD_DOWN_SECONDS = 2.0
+
+
+def _edge_interfaces():
+    """edge -> the set of monitored interface names that observe it. A
+    physical link has two independently-reporting OVS interfaces; an edge
+    is only confirmed recovered once every interface that observes it has
+    reported `up` (see _edge_confirmed_up below). Recomputed as a function,
+    not a module-level constant, so it reflects MONITORED_INTERFACES after
+    load_topology_config() has possibly overridden it."""
+    result = {}
+    for name, (a, b) in MONITORED_INTERFACES.items():
+        result.setdefault(frozenset({a, b}), set()).add(name)
+    return result
+
+
+EDGE_INTERFACES = _edge_interfaces()
 
 
 def log(event, **fields):
@@ -119,9 +173,27 @@ def path_to_flows(path):
 
 
 def apply_flow(action, bridge, arg):
+    """Installs/withdraws one flow. A `bridge` present in REMOTE_ENDPOINTS is
+    routed directly through `ovs-ofctl` at that switch's registered remote
+    OpenFlow target instead of through the local `daim_ovs_flow` CLI -- the
+    per-hop routing logic a multi-OVS deployment needs (Section 8.3): the
+    agent still runs as a single process with one decision loop, but its I/O
+    now goes to whichever OVS instance actually owns the bridge in question,
+    not always the local one. The remote path calls the identical
+    `ovs-ofctl -O OpenFlow13 <add-flow|del-flows> <target> <flow>` command
+    daim_ovs_flow.c wraps for the local case (Section 4.6), just with an
+    explicit `tcp:HOST:PORT` target instead of a local bridge name -- both
+    are valid `ovs-ofctl` connection targets, so this is not a different
+    code path in spirit, only in which binary invokes it."""
     log("flow_start", action=action, bridge=bridge, arg=arg)
+    remote = REMOTE_ENDPOINTS.get(bridge)
+    if remote:
+        ofctl_action = "add-flow" if action == "add" else "del-flows"
+        argv = ["ovs-ofctl", "-O", "OpenFlow13", ofctl_action, remote["openflow"], arg]
+    else:
+        argv = [str(CLI), action, bridge, arg]
     try:
-        r = subprocess.run([str(CLI), action, bridge, arg], text=True, capture_output=True, timeout=5)
+        r = subprocess.run(argv, text=True, capture_output=True, timeout=5)
     except subprocess.TimeoutExpired:
         log("flow_timeout", action=action, bridge=bridge, arg=arg)
         return False
@@ -300,13 +372,37 @@ def _parse_monitor_line(line, actions=("new",)):
     return rows
 
 
-def _start_monitor():
-    global _monitor_proc
-    proc = subprocess.Popen(
-        ["ovsdb-client", "monitor", "Interface", "name,link_state", "--format=json"],
-        stdout=subprocess.PIPE, text=True, bufsize=1,
-    )
-    _monitor_proc = proc
+def _owning_switch(name):
+    """The switch an OVS interface name belongs to, by naming convention
+    (e.g. "s3-eth1" belongs to "s3") -- used to look up which OVSDB/OpenFlow
+    endpoint a monitored interface's switch lives on."""
+    return name.split("-eth")[0]
+
+
+def _ovsdb_target_for_interface(name):
+    remote = REMOTE_ENDPOINTS.get(_owning_switch(name))
+    return remote["ovsdb"] if remote else None
+
+
+def _monitored_ovsdb_targets():
+    """The distinct set of ovsdb-client monitor targets needed to observe
+    every interface in MONITORED_INTERFACES: None for the agent's own local
+    OVSDB instance, plus one entry per distinct remote OVSDB endpoint
+    referenced by REMOTE_ENDPOINTS. In the default (empty REMOTE_ENDPOINTS)
+    configuration this is always exactly `[None]` -- a single local
+    connection, the deployment every other experiment in this evidence set
+    measures."""
+    targets = {_ovsdb_target_for_interface(name) for name in MONITORED_INTERFACES}
+    return sorted(targets, key=lambda t: (t is not None, t))
+
+
+def _start_monitor(ovsdb_target=None):
+    cmd = ["ovsdb-client", "monitor"]
+    if ovsdb_target:
+        cmd.append(ovsdb_target)
+    cmd += ["Interface", "name,link_state", "--format=json"]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, bufsize=1)
+    _monitor_procs.append(proc)
     return proc
 
 
@@ -344,39 +440,41 @@ def read_initial_snapshot(proc, timeout=10.0):
     return {name: state for name, state in rows if name in MONITORED_INTERFACES}
 
 
-def monitor_link_rows(proc, poll_interval=None):
-    """Yields (name, link_state) for every real 'new' row OVSDB pushes on
-    Interface.link_state on an *already-started* monitor subprocess (see
-    _start_monitor/read_initial_snapshot, which must run first so the
-    initial snapshot this generator does not handle is not lost), in the
-    order ovsdb-client delivers them.
+def monitor_link_rows(procs, poll_interval=None):
+    """Yields (name, link_state) for every real 'new' row pushed by any of
+    the given *already-started* monitor subprocesses (see _start_monitor/
+    read_initial_snapshot, which must run first for each so the initial
+    snapshot this generator does not handle is not lost), multiplexed via
+    `select()` across however many there are. A multi-OVS deployment opens
+    one connection per distinct OVSDB endpoint its MONITORED_INTERFACES
+    span (Section 8.3's connection-multiplexing requirement) and passes all
+    of them here as a list; the default single-endpoint configuration
+    passes a list of exactly one, and this behaves identically to watching
+    that one connection as before.
 
     If `poll_interval` is given, also yields `None` at least every
-    `poll_interval` seconds when no OVSDB event has arrived. This is *not*
-    failure-detection polling -- a real link-down/up event still arrives
-    immediately via the push subscription below and is yielded the instant
-    it is read. The `None` ticks exist only so main() can call
-    reconcile_expired_holddowns() on a bounded schedule even when an
-    interface's hold-down window expires with no further event ever seen
-    for it (see reconcile_expired_holddowns' docstring for why that case
-    needs a wake-up source at all)."""
-    if poll_interval is None:
-        for line in proc.stdout:
-            for name, state in _parse_monitor_line(line):
-                yield name, state
-        return
-
+    `poll_interval` seconds when no OVSDB event has arrived on *any*
+    connection. This is *not* failure-detection polling -- a real
+    link-down/up event still arrives immediately via the push subscription
+    it occurred on and is yielded the instant it is read. The `None` ticks
+    exist only so main() can call reconcile_expired_holddowns() on a
+    bounded schedule even when an interface's hold-down window expires with
+    no further event ever seen for it (see reconcile_expired_holddowns'
+    docstring for why that case needs a wake-up source at all)."""
     import select
-    while True:
-        ready, _, _ = select.select([proc.stdout], [], [], poll_interval)
+    streams = [p.stdout for p in procs]
+    while streams:
+        ready, _, _ = select.select(streams, [], [], poll_interval)
         if not ready:
             yield None
             continue
-        line = proc.stdout.readline()
-        if not line:
-            return
-        for name, state in _parse_monitor_line(line):
-            yield name, state
+        for stream in ready:
+            line = stream.readline()
+            if not line:
+                streams.remove(stream)
+                continue
+            for name, state in _parse_monitor_line(line):
+                yield name, state
 
 
 def down_edges_from_snapshot(snapshot):
@@ -408,16 +506,22 @@ def down_edges_from_snapshot(snapshot):
 
 
 def main():
-    proc = _start_monitor()
+    targets = _monitored_ovsdb_targets()
+    procs = [_start_monitor(target) for target in targets]
+    if len(targets) > 1:
+        log("multi_ovs_connections_opened", targets=[t or "local" for t in targets])
     # Every exit from this block -- a normal sys.exit(1) on a fatal startup
     # condition, or an unexpected exception such as down_edges_from_snapshot's
     # RuntimeError on an unrecognised link_state value -- must still
-    # terminate the monitor child; without this, a fatal startup path leaked
-    # an orphaned `ovsdb-client monitor` exactly like the case the
+    # terminate every monitor child; without this, a fatal startup path
+    # leaked an orphaned `ovsdb-client monitor` exactly like the case the
     # SIGTERM/SIGINT handler above already guards against, just reached a
-    # different way (an in-process exit rather than a signal).
+    # different way (an in-process exit rather than a signal). A multi-OVS
+    # deployment can have more than one such child open at once.
     try:
-        initial = read_initial_snapshot(proc)
+        initial = {}
+        for proc in procs:
+            initial.update(read_initial_snapshot(proc))
         missing = [name for name in MONITORED_INTERFACES if name not in initial]
         if missing:
             log("fatal", reason="missing initial OVSDB state for monitored interface(s)",
@@ -436,12 +540,13 @@ def main():
         log("agent_started", initial_path=current_path,
             down_edges=[list(edge) for edge in down_edges])
     except BaseException:
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+        for proc in procs:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
         raise
 
     held_down_until = {}
@@ -449,7 +554,7 @@ def main():
     # poll_interval only drives reconcile_expired_holddowns() wake-ups
     # (see that function's docstring); it is well under HOLD_DOWN_SECONDS so
     # an expired window is reconciled promptly even with no further event.
-    for event in monitor_link_rows(proc, poll_interval=HOLD_DOWN_SECONDS / 4):
+    for event in monitor_link_rows(procs, poll_interval=HOLD_DOWN_SECONDS / 4):
         if event is None:
             recovered = reconcile_expired_holddowns(
                 held_down_until, interface_state, down_edges, time.monotonic(),
