@@ -57,7 +57,7 @@ uses them.
   performs the actual OVSDB/adapter I/O. Hold-down state is keyed by physical
   edge (the frozenset of the two switches a link connects), not by interface
   name, since v0.3.0 (see below).
-- `network/test_daim_link_agent.py` — thirteen pure-logic unit tests, runnable
+- `network/test_daim_link_agent.py` — fifteen pure-logic unit tests, runnable
   with plain `python3` and no Mininet/OVS/OVSDB: (1) BFS path computation
   against hand-verified expected flow sets; (2) the hold-down state machine
   driven through a synthetic seven-transition flapping-link sequence, with
@@ -75,8 +75,12 @@ uses them.
   (12) confirming an empty `REMOTE_ENDPOINTS` resolves to exactly one local
   monitor target, matching every single-host experiment; (13) confirming a
   non-empty `REMOTE_ENDPOINTS` routes each interface to its own switch's
-  endpoint with connections deduplicated per distinct target (v0.8.0, see
-  below).
+  endpoint with connections deduplicated per distinct target (v0.8.0);
+  (14) confirming `apply_flow()` routes both local and remote bridges
+  through the same `daim_ovs_flow` adapter binary; (15) confirming a
+  partially-failed repair is reported as `repair_incomplete` with
+  `current_path` left unchanged, not silently claimed as success (v0.9.0,
+  see below).
 - `network/test_stage3_startup_already_down.py` — a regression test for a
   bug in the startup live-network harness itself (v0.6.0, see below), kept
   separate from `test_daim_link_agent.py` since it tests the harness, not
@@ -209,6 +213,49 @@ Two more findings from re-reading the v0.6.0 code and figures together:
   schedule is what actually demonstrates the BFS-call reduction; this live
   figure now says so explicitly instead of implying a reduction the live
   data never measured.
+
+## Adapter unification and failure-honesty fix, found by external review (v0.9.0)
+
+External review of the v0.8.0 report and manuscript found two real issues in the multi-OVS
+extension, neither a test failure -- both found by reading the actual code and the actual claims
+side by side.
+
+- **Architecture inconsistency.** The manuscript's Abstract and Section 4.1 claim repair paths are
+  installed "through the existing DAIM-OS OVS adapter", but `apply_flow()`'s remote-bridge path
+  bypassed that adapter (`daim_ovs_flow`) and called `ovs-ofctl` directly -- functionally correct,
+  but inconsistent with the paper's own claim for exactly the new experiment meant to extend it.
+  Before assuming a C-code change was needed, this was checked empirically: `daim_ovs_flow`/
+  `ovs_switch_adapter.c` (Paper 1) already forward their target argument as an opaque string into
+  `ovs-ofctl -O OpenFlow13 <add-flow|del-flows> <target> <flow>`, and `ovs-ofctl` itself accepts
+  either a local bridge name or a remote `tcp:HOST:PORT` target at that position. `daim_ovs_flow add
+  tcp:<VM2>:6636 "priority=100,in_port=1,actions=output:2"`, run against the live testbed, installed
+  a real flow on the remote switch with zero C-code changes -- confirmed with `ovs-ofctl dump-flows`
+  immediately after, and the matching `delete` call removed it. The fix was entirely in
+  `apply_flow()`, which now always calls `daim_ovs_flow` for both local and remote bridges. New
+  test: `test_apply_flow_routes_remote_bridge_through_adapter`.
+- **Partial-failure misreporting.** `install_path()`/`withdraw_path()` discarded `apply_flow()`'s
+  per-call success/failure entirely, so `main()` could log `repair_installed` and advance
+  `current_path` even if a flow-mod call had failed -- a partial installation failure was silently
+  reported as a clean repair. New `execute_repair()` only uses the `repair_installed` event name and
+  advances `current_path` if every flow-mod call across withdraw and install succeeded; otherwise it
+  reports a distinct `repair_incomplete` event with `current_path` left unchanged. This does not
+  implement the two-phase staged/commit/rollback protocol Section 5.2 specifies -- flows that did
+  succeed before a failure are still not undone -- it only stops the agent from claiming success it
+  did not achieve. New test: `test_execute_repair_reports_partial_failure_honestly`.
+
+The n=5 multi-OVS measurement was re-run in full against the fixed code (not reused): all five
+repetitions again succeeded cleanly (no `repair_incomplete` ever produced), with mean repair-action
+time rising modestly from 185.75 ms (pre-fix, direct `ovs-ofctl`) to 191.48 ms (post-fix, through the
+adapter) -- about 5.7 ms attributable to the extra process-spawn hop `daim_ovs_flow` itself
+introduces (it `posix_spawn`s `ovs-ofctl`), reported as the honest cost of closing the
+architecture-consistency finding, not hidden. Pre-fix raw data is retained alongside the new data as
+`..._pre_adapter_unification.*`. Same review also corrected an outage-duration bound in the
+ping-gap analysis (`STAGE3_MULTI_OVS_REPORT.md`): for `N` consecutive lost probes at a fixed
+interval `Δ`, the true outage duration lies strictly between `(N-1)Δ` and `(N+1)Δ`, not the tighter
+`[N Δ, (N+1)Δ)` an earlier version stated; and fixed imprecise wording that called the ping probe
+"an independent process on a different host" when it in fact runs in `h1`'s Mininet namespace on the
+same VM as the agent (a different OS process, real inter-VM traffic, just not a different host).
+13/13 → now 15/15 unit tests pass (two new tests added).
 
 ## Multi-OVS connection multiplexing and per-hop flow routing, measured live (v0.8.0)
 

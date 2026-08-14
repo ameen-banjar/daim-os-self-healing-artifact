@@ -1,0 +1,6 @@
+rep,initial_path,repaired_path,detected_edge,detect_to_repair_start_ms,repair_action_ms,transition_suppressed,ping_missing_pkts_in_gap,ping_gap_lower_bound_ms
+1,s1|s3|s4,s1|s3|s5|s4,s3-s4,0.065,180.226,s3-eth1,9,180
+2,s1|s3|s4,s1|s3|s5|s4,s3-s4,0.117,191.782,s3-eth1,8,160
+3,s1|s3|s4,s1|s3|s5|s4,s3-s4,0.064,185.294,s3-eth1,9,180
+4,s1|s3|s4,s1|s3|s5|s4,s3-s4,0.062,190.805,s3-eth1,9,180
+5,s1|s3|s4,s1|s3|s5|s4,s3-s4,0.07,180.627,s3-eth1,9,180

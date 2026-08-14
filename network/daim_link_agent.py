@@ -173,25 +173,32 @@ def path_to_flows(path):
 
 
 def apply_flow(action, bridge, arg):
-    """Installs/withdraws one flow. A `bridge` present in REMOTE_ENDPOINTS is
-    routed directly through `ovs-ofctl` at that switch's registered remote
-    OpenFlow target instead of through the local `daim_ovs_flow` CLI -- the
-    per-hop routing logic a multi-OVS deployment needs (Section 8.3): the
-    agent still runs as a single process with one decision loop, but its I/O
-    now goes to whichever OVS instance actually owns the bridge in question,
-    not always the local one. The remote path calls the identical
-    `ovs-ofctl -O OpenFlow13 <add-flow|del-flows> <target> <flow>` command
-    daim_ovs_flow.c wraps for the local case (Section 4.6), just with an
-    explicit `tcp:HOST:PORT` target instead of a local bridge name -- both
-    are valid `ovs-ofctl` connection targets, so this is not a different
-    code path in spirit, only in which binary invokes it."""
+    """Installs/withdraws one flow through the DAIM-OS OVS adapter
+    (`daim_ovs_flow`), for both local and remote bridges. A `bridge` present
+    in REMOTE_ENDPOINTS passes that switch's registered remote OpenFlow
+    target (a `tcp:HOST:PORT` string) as the adapter's target argument
+    instead of a local bridge name; a bridge absent from REMOTE_ENDPOINTS
+    passes the bridge name unchanged, exactly as every single-host
+    experiment in this evidence set already does. This is not two different
+    code paths: `daim_ovs_flow`/`ovs_switch_adapter.c` treat their target
+    argument as an opaque string, forwarded unchanged into `ovs-ofctl -O
+    OpenFlow13 <add-flow|del-flows> <target> <flow>` -- `ovs-ofctl` itself
+    accepts either a local bridge name or a remote `tcp:HOST:PORT` target at
+    that position, so the adapter already supported this with no C-code
+    change, confirmed empirically (`daim_ovs_flow add tcp:<VM2>:6636 ...`
+    installed a real flow on VM2's `s5` from VM1, and the matching `delete`
+    removed it) before this function was changed to use it. An earlier
+    revision of this function bypassed the adapter for the remote case and
+    called `ovs-ofctl` directly, which technically worked but broke this
+    paper's own claim that repair paths are installed "through the existing
+    DAIM-OS OVS adapter" for the remote hops of a multi-OVS deployment; this
+    version keeps that claim true for both hop types, and additionally gets
+    the adapter's `valid_token()` length/newline validation on the remote
+    target argument, which the direct-`ovs-ofctl` version did not have."""
     log("flow_start", action=action, bridge=bridge, arg=arg)
     remote = REMOTE_ENDPOINTS.get(bridge)
-    if remote:
-        ofctl_action = "add-flow" if action == "add" else "del-flows"
-        argv = ["ovs-ofctl", "-O", "OpenFlow13", ofctl_action, remote["openflow"], arg]
-    else:
-        argv = [str(CLI), action, bridge, arg]
+    target = remote["openflow"] if remote else bridge
+    argv = [str(CLI), action, target, arg]
     try:
         r = subprocess.run(argv, text=True, capture_output=True, timeout=5)
     except subprocess.TimeoutExpired:
@@ -204,16 +211,60 @@ def apply_flow(action, bridge, arg):
 
 
 def install_path(path):
+    """Returns True only if every flow-add call for `path` succeeded."""
+    ok = True
     for bridge, flow in path_to_flows(path):
-        apply_flow("add", bridge, flow)
+        if not apply_flow("add", bridge, flow):
+            ok = False
+    return ok
 
 
 def withdraw_path(path):
+    """Returns True only if every flow-delete call for `path` succeeded."""
+    ok = True
     for bridge, flow in path_to_flows(path):
         # del-flows match syntax does not accept "priority=..."; strip it,
         # matching stage3_link_recovery.py's install_alternate() convention.
         match = flow.split(",actions=")[0].split(",", 1)[1]
-        apply_flow("delete", bridge, match)
+        if not apply_flow("delete", bridge, match):
+            ok = False
+    return ok
+
+
+def execute_repair(decision, current_path):
+    """Executes the I/O for a "repair" decision: withdraws the old path,
+    installs the new one, and reports what actually happened -- it does NOT
+    claim success (does not use the `repair_installed` event name, does not
+    advance the caller's `current_path`) unless every flow add/delete call
+    across both withdraw and install actually succeeded. An earlier revision
+    of this logic (inline in main()'s loop) called `install_path()` and
+    `withdraw_path()` for their side effects only, discarding whether any
+    individual `apply_flow()` call failed, then unconditionally logged
+    `repair_installed` and advanced `current_path` regardless -- so a
+    partially-failed installation (a remote OVS instance unreachable, a
+    timeout, a rejected flow) was silently reported as a clean repair, with
+    nothing in the log distinguishing it from a real one. This does not
+    implement the two-phase staged/commit/rollback protocol Section 5.2
+    specifies -- flows that DID succeed before a failure are not undone, and
+    the network can still be left in a mixed old/new state exactly as
+    Section 4.6 already documents -- it only stops the agent from claiming a
+    success it did not achieve. Returns (new_current_path, event_name,
+    event_fields) for the caller to log."""
+    repair_start_ns = time.perf_counter_ns()
+    withdraw_ok = withdraw_path(current_path)
+    install_ok = install_path(decision["new_path"])
+    repair_end_ns = time.perf_counter_ns()
+    if withdraw_ok and install_ok:
+        return decision["new_path"], "repair_installed", {
+            "path": decision["new_path"],
+            "repair_start_ns": repair_start_ns, "repair_end_ns": repair_end_ns,
+            "held_down_seconds": HOLD_DOWN_SECONDS,
+        }
+    return current_path, "repair_incomplete", {
+        "attempted_path": decision["new_path"], "path": current_path,
+        "withdraw_ok": withdraw_ok, "install_ok": install_ok,
+        "repair_start_ns": repair_start_ns, "repair_end_ns": repair_end_ns,
+    }
 
 
 def is_held_down(edge, held_down_until, now):
@@ -581,14 +632,8 @@ def main():
             log("repair_failed", reason=decision["reason"])
         elif action == "repair":
             log("link_down_detected", interface=name, edge=decision["edge"], ns=detected_ns)
-            repair_start_ns = time.perf_counter_ns()
-            withdraw_path(current_path)
-            install_path(decision["new_path"])
-            current_path = decision["new_path"]
-            repair_end_ns = time.perf_counter_ns()
-            log("repair_installed", path=current_path,
-                repair_start_ns=repair_start_ns, repair_end_ns=repair_end_ns,
-                held_down_seconds=HOLD_DOWN_SECONDS)
+            current_path, event_name, event_fields = execute_repair(decision, current_path)
+            log(event_name, **event_fields)
         elif action == "recovered":
             log("link_up_detected", interface=name)
         elif action == "invalid_link_state":

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pure-logic unit tests for daim_link_agent, independent of Mininet/OVS/OVSDB.
 
-Eleven things are checked without a live network:
+Fifteen things are checked without a live network:
 1. `test_bfs_path_computation` -- the BFS-computed primary and alternate
    paths produce exactly the flow sets that were previously hand-written in
    stage3_link_recovery.py's install_primary()/install_alternate(), so the
@@ -49,7 +49,24 @@ Eleven things are checked without a live network:
 11. `test_decide_link_event_rejects_unexpected_link_state` -- the same
     check's runtime counterpart: an unrecognised `link_state` value in the
     ongoing event stream must be rejected outright, not fall through to
-    "ignored"."""
+    "ignored".
+12. `test_default_config_uses_single_local_ovsdb_target` -- an empty
+    `REMOTE_ENDPOINTS` (the default) resolves to exactly one local monitor
+    target, so the multi-OVS extension is inert unless opted into.
+13. `test_multi_ovs_target_routing` -- a non-empty `REMOTE_ENDPOINTS` routes
+    each interface to its own switch's registered remote endpoint, with
+    connections deduplicated per distinct target.
+14. `test_apply_flow_routes_remote_bridge_through_adapter` -- `apply_flow()`
+    calls the DAIM-OS `daim_ovs_flow` adapter binary for both local and
+    remote bridges, passing the remote OpenFlow target string in the same
+    argument position a local bridge name would occupy, rather than
+    bypassing the adapter for the remote case (Section 4.4/4.6).
+15. `test_execute_repair_reports_partial_failure_honestly` -- `execute_repair()`
+    (the I/O half of a "repair" decision) only uses the `repair_installed`
+    event name and only advances the caller's `current_path` if every
+    flow-mod call across withdraw and install actually succeeded; a
+    partial failure is reported as `repair_incomplete` with `current_path`
+    left unchanged, instead of being silently reported as a clean repair."""
 import json
 import os
 
@@ -59,6 +76,7 @@ from daim_link_agent import (
     bfs_path,
     decide_link_event,
     down_edges_from_snapshot,
+    execute_repair,
     path_to_flows,
     read_initial_snapshot,
     reconcile_expired_holddowns,
@@ -607,6 +625,95 @@ def test_multi_ovs_target_routing():
           "endpoint, and connections are deduplicated per distinct target.")
 
 
+def test_apply_flow_routes_remote_bridge_through_adapter():
+    """apply_flow() must call the DAIM-OS `daim_ovs_flow` adapter binary for
+    BOTH local and remote bridges -- an earlier revision bypassed the
+    adapter for the remote case and called `ovs-ofctl` directly, which
+    worked (confirmed live: a real flow was added to and deleted from VM2's
+    `s5` from VM1 through the unmodified adapter binary before this fix, so
+    the adapter already forwards its target argument opaquely), but broke
+    the manuscript's own claim that repair paths go through the existing
+    DAIM-OS OVS adapter for a multi-OVS deployment's remote hops. Captures
+    the actual subprocess.run() argv instead of letting anything run, so
+    this needs no adapter binary or live OVS instance to check."""
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        class Result:
+            returncode = 0
+            stderr = ""
+        return Result()
+
+    saved_endpoints = dict(daim_link_agent.REMOTE_ENDPOINTS)
+    saved_run = daim_link_agent.subprocess.run
+    try:
+        daim_link_agent.subprocess.run = fake_run
+        daim_link_agent.REMOTE_ENDPOINTS = {
+            "s3": {"ovsdb": "tcp:192.0.2.2:6640", "openflow": "tcp:192.0.2.2:6634"},
+        }
+        assert daim_link_agent.apply_flow("add", "s1", "priority=100,in_port=1,actions=output:2")
+        assert calls[-1] == [str(daim_link_agent.CLI), "add", "s1", "priority=100,in_port=1,actions=output:2"], (
+            "a local bridge must still go through the adapter with the bridge name unchanged"
+        )
+        assert daim_link_agent.apply_flow("add", "s3", "priority=100,in_port=1,actions=output:2")
+        assert calls[-1] == [str(daim_link_agent.CLI), "add", "tcp:192.0.2.2:6634", "priority=100,in_port=1,actions=output:2"], (
+            "a remote bridge must go through the SAME adapter binary, with the remote "
+            "OpenFlow target substituted for the bridge name -- not a direct ovs-ofctl call"
+        )
+    finally:
+        daim_link_agent.subprocess.run = saved_run
+        daim_link_agent.REMOTE_ENDPOINTS = saved_endpoints
+
+    print("daim_link_agent apply_flow adapter-unification regression test: PASS "
+          "-- local and remote bridges both go through the daim_ovs_flow adapter binary, "
+          "just with a different target argument.")
+
+
+def test_execute_repair_reports_partial_failure_honestly():
+    """execute_repair() must not use the `repair_installed` event name, and
+    must not advance `current_path`, unless every flow-mod call across both
+    withdraw and install actually succeeded. An earlier revision (inline in
+    main()'s loop) called install_path()/withdraw_path() for their side
+    effects only, discarding apply_flow()'s per-call success/failure, and
+    unconditionally logged `repair_installed` and advanced `current_path`
+    regardless -- so a partial installation failure (a remote OVS instance
+    unreachable, a timeout) was silently reported as a clean repair."""
+    saved_apply_flow = daim_link_agent.apply_flow
+    old_path = ["s1", "s2", "s4"]
+    new_path = ["s1", "s3", "s4"]
+    decision = {"action": "repair", "new_path": new_path}
+    try:
+        daim_link_agent.apply_flow = lambda action, bridge, arg: True
+        result_path, event_name, fields = execute_repair(decision, old_path)
+        assert result_path == new_path
+        assert event_name == "repair_installed"
+        assert fields["path"] == new_path
+
+        def failing_apply_flow(action, bridge, arg):
+            return not (action == "add" and bridge == "s3")
+
+        daim_link_agent.apply_flow = failing_apply_flow
+        result_path, event_name, fields = execute_repair(decision, old_path)
+        assert result_path == old_path, (
+            "current_path must NOT advance to the attempted new path when an "
+            "install call failed -- the caller must not believe the repair "
+            "succeeded when it did not"
+        )
+        assert event_name == "repair_incomplete", (
+            "a partially-failed installation must be reported under a distinct "
+            "event name, not silently logged as repair_installed"
+        )
+        assert fields["install_ok"] is False
+        assert fields["attempted_path"] == new_path
+    finally:
+        daim_link_agent.apply_flow = saved_apply_flow
+
+    print("daim_link_agent execute_repair failure-honesty regression test: PASS "
+          "-- a partial installation failure is reported as repair_incomplete "
+          "with current_path left unchanged, not silently claimed as success.")
+
+
 def main():
     test_bfs_path_computation()
     test_holddown_suppresses_flapping()
@@ -621,6 +728,8 @@ def main():
     test_decide_link_event_rejects_unexpected_link_state()
     test_default_config_uses_single_local_ovsdb_target()
     test_multi_ovs_target_routing()
+    test_apply_flow_routes_remote_bridge_through_adapter()
+    test_execute_repair_reports_partial_failure_honestly()
 
 
 if __name__ == "__main__":

@@ -6,10 +6,11 @@ authors:
   - family-names: Banjar
     given-names: Ameen
     orcid: "https://orcid.org/0000-0002-0871-5153"
-version: 0.8.0
-date-released: 2026-08-14
+version: 0.9.0
+date-released: 2026-08-15
 license: Apache-2.0
-doi: 10.5281/zenodo.21939224
+# doi: TODO -- fill in the v0.9.0 version-specific DOI once this tag's
+# release is minted by Zenodo. v0.8.0 DOI: 10.5281/zenodo.21939224.
 # v0.7.0 DOI: 10.5281/zenodo.21924978. v0.6.0 DOI: 10.5281/zenodo.21918394.
 # v0.5.0 DOI: 10.5281/zenodo.21912414. v0.4.0 DOI: 10.5281/zenodo.21910227.
 # v0.3.0 DOI: 10.5281/zenodo.21909633. v0.1.0 DOI: 10.5281/zenodo.21906993.
@@ -65,14 +66,29 @@ abstract: >-
   multiple ovsdb-client monitor connections in monitor_link_rows()), measured
   against a real two-VM testbed joined by a GRE tunnel: a remote-edge
   failure -- on switches the agent shares no local OVSDB connection with --
-  was correctly detected and repaired across five repetitions (mean
-  repair-action time 185.75 ms), independently corroborated by the
-  packet-loss gap observed in the concurrent probe traffic on a different
-  host. Contains pure-logic
+  was correctly detected and repaired across five repetitions. v0.9.0 fixes
+  two issues found by external review of that same result: apply_flow()
+  bypassed the DAIM-OS OVS adapter (daim_ovs_flow) for remote bridges and
+  called ovs-ofctl directly, inconsistent with this paper's own adapter
+  claim -- fixed by routing both local and remote bridges through the same
+  adapter binary, confirmed empirically to already support a remote target
+  with no C-code change; and install_path()/withdraw_path() discarded
+  apply_flow()'s per-call success/failure, so a partially-failed
+  installation could be logged as repair_installed -- fixed by a new
+  execute_repair() that only reports success, and only advances
+  current_path, when every flow-mod call actually succeeded, otherwise
+  reporting a distinct repair_incomplete event. The n=5 measurement was
+  re-run against the fixed code: still 5/5 clean, mean repair-action time
+  191.48 ms (up from 185.75 ms pre-fix, the honest cost of the extra
+  process-spawn hop the adapter path adds), independently bounded by the
+  packet-loss gap in the concurrent probe traffic (an independent process
+  in the agent's own VM, not a different host -- corrected from an earlier,
+  imprecise description). Contains pure-logic
   unit tests for the path computation and all hold-down/startup behaviours
   (suppression, stale-state reconciliation, cross-interface coverage,
   edge-confirmation, startup synchronization, link_state validation at both
-  startup and runtime, multi-OVS target routing), all
+  startup and runtime, multi-OVS target routing, adapter unification,
+  partial-failure honesty), all
   runnable without Mininet/OVS; live-network flapping-link,
   startup-already-down, and multi-OVS-deployment scripts and their raw data
   and event logs across every pre-fix and post-fix run, retained side by

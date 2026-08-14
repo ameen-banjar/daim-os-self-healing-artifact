@@ -270,7 +270,7 @@ def draw_topology(path):
     font = ImageFont.load_default(size=38)
     small = ImageFont.load_default(size=34)
 
-    draw.text((24, 24), "Diamond topology used for all Paper 3 measurements", fill="#111111", font=title_font)
+    draw.text((24, 24), "Diamond topology: single-host Paper 3 measurements", fill="#111111", font=title_font)
 
     cy = 500
     h1 = sized_box(draw, 110, cy, "h1\n(source)", font, fill="#EAF2FB", outline="#0072B2")
@@ -292,8 +292,9 @@ def draw_topology(path):
     draw.text((420, 795), "alternate path (s1-s3-s4), installed after repair", fill="#0072B2", font=small)
 
     draw.text(
-        (24, 880),
-        "4 switches, 5 links. This is the only topology measured for Paper 3 so far.",
+        (24, 858),
+        "4 switches, 5 links. This diamond is the topology for every Paper 3 network-level measurement\n"
+        "except the multi-OVS deployment (Figure 8), which uses a separate two-host topology.",
         fill="#333333", font=small,
     )
     image.save(path)
@@ -632,7 +633,8 @@ def draw_startup_comparison(path):
 def draw_multi_ovs_deployment(path):
     rows = _read_flap_csv(MULTI_OVS_RAW)
     repair = [float(r["repair_action_ms"]) for r in rows]
-    gap = [float(r["ping_gap_lower_bound_ms"]) for r in rows]
+    gap_lo = [float(r["ping_outage_bound_lower_ms"]) for r in rows]
+    gap_hi = [float(r["ping_outage_bound_upper_ms"]) for r in rows]
     mean_repair = sum(repair) / len(repair)
 
     width, height = 1750, 1300
@@ -704,13 +706,13 @@ def draw_multi_ovs_deployment(path):
     draw.rectangle((24, legend_y, 48, legend_y + 24), fill="#0072B2")
     draw.text((56, legend_y), f"agent repair-action time (repair_start_ns to repair_end_ns); mean {mean_repair:.1f} ms shown as horizontal line", fill="#222222", font=tiny)
     draw.rectangle((24, legend_y + 36, 48, legend_y + 60), fill="#D55E00")
-    draw.text((56, legend_y + 36), "independent ping-gap lower bound (icmp_seq gap x 20 ms)", fill="#222222", font=tiny)
+    draw.text((56, legend_y + 36), "independent ping-derived outage bound: (missing-1)x20ms to (missing+1)x20ms", fill="#222222", font=tiny)
 
     chart_top = legend_y + 110
     chart_left = 140
     chart_w = 1500
     chart_h = 340
-    max_val = max(repair + gap) * 1.2
+    max_val = max(repair + gap_hi) * 1.2
     n = len(rows)
     group_w = chart_w / n
     bar_w = 70
@@ -719,16 +721,20 @@ def draw_multi_ovs_deployment(path):
     draw.line((chart_left, chart_top + chart_h, chart_left + chart_w, chart_top + chart_h), fill="#333333", width=3)
     draw.text((24, chart_top - 6), "ms", fill="#666666", font=tiny)
 
-    for i, (r, g) in enumerate(zip(repair, gap)):
+    for i, (r, lo, hi) in enumerate(zip(repair, gap_lo, gap_hi)):
         gx = chart_left + i * group_w + group_w / 2
         r_h = int(chart_h * r / max_val)
-        g_h = int(chart_h * g / max_val)
+        lo_h = int(chart_h * lo / max_val)
+        hi_h = int(chart_h * hi / max_val)
         rx0 = gx - bar_w - 6
         gx0 = gx + 6
         draw.rectangle((rx0, chart_top + chart_h - r_h, rx0 + bar_w, chart_top + chart_h), fill="#0072B2")
-        draw.rectangle((gx0, chart_top + chart_h - g_h, gx0 + bar_w, chart_top + chart_h), fill="#D55E00")
+        # Range bar (lo->hi bound), not a single value -- a lighter fill plus
+        # a solid tick at the lower bound signals "range", not "measurement".
+        draw.rectangle((gx0, chart_top + chart_h - hi_h, gx0 + bar_w, chart_top + chart_h - lo_h), fill="#F3C6A5")
+        draw.rectangle((gx0, chart_top + chart_h - lo_h - 4, gx0 + bar_w, chart_top + chart_h - lo_h), fill="#D55E00")
         draw.text((rx0 - 4, chart_top + chart_h - r_h - 34), f"{r:.0f}", fill="#0072B2", font=tiny)
-        draw.text((gx0 - 4, chart_top + chart_h - g_h - 34), f"{g:.0f}", fill="#D55E00", font=tiny)
+        draw.text((gx0 - 4, chart_top + chart_h - hi_h - 34), f"{lo:.0f}-{hi:.0f}", fill="#D55E00", font=tiny)
         draw.text((gx - 26, chart_top + chart_h + 14), f"rep {i+1}", fill="#333333", font=tiny)
 
     mean_y = chart_top + chart_h - int(chart_h * mean_repair / max_val)
@@ -736,9 +742,10 @@ def draw_multi_ovs_deployment(path):
 
     draw.text(
         (24, chart_top + chart_h + 60),
-        "Ping-gap values are read from the concurrent probe's own icmp_seq numbers, not from the agent's log --\n"
-        "an independent, packet-level confirmation that the reported repair timing corresponds to a real,\n"
-        "measurable data-plane interruption, not only an internal timestamp.",
+        "Outage bounds are derived from the concurrent probe's own icmp_seq numbers, not from the agent's log:\n"
+        "for N consecutive lost probes at a fixed 20ms interval, the true outage duration lies strictly between\n"
+        "(N-1)x20ms and (N+1)x20ms. The agent-reported repair-action time falls inside this bound in every\n"
+        "repetition -- an independent, packet-level consistency check, not a precise second measurement.",
         fill="#666666", font=small,
     )
     image.save(path)
