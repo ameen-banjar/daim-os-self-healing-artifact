@@ -9,11 +9,11 @@ authors:
 version: 0.9.0
 date-released: 2026-08-15
 license: Apache-2.0
-# doi: TODO -- fill in the v0.9.0 version-specific DOI once this tag's
-# release is minted by Zenodo. v0.8.0 DOI: 10.5281/zenodo.21939224.
-# v0.7.0 DOI: 10.5281/zenodo.21924978. v0.6.0 DOI: 10.5281/zenodo.21918394.
-# v0.5.0 DOI: 10.5281/zenodo.21912414. v0.4.0 DOI: 10.5281/zenodo.21910227.
-# v0.3.0 DOI: 10.5281/zenodo.21909633. v0.1.0 DOI: 10.5281/zenodo.21906993.
+doi: 10.5281/zenodo.21940478
+# v0.8.0 DOI: 10.5281/zenodo.21939224. v0.7.0 DOI: 10.5281/zenodo.21924978.
+# v0.6.0 DOI: 10.5281/zenodo.21918394. v0.5.0 DOI: 10.5281/zenodo.21912414.
+# v0.4.0 DOI: 10.5281/zenodo.21910227. v0.3.0 DOI: 10.5281/zenodo.21909633.
+# v0.1.0 DOI: 10.5281/zenodo.21906993.
 # Concept DOI (always resolves to latest version): 10.5281/zenodo.21906992.
 repository-code: "https://github.com/ameen-banjar/daim-os-self-healing-artifact"
 abstract: >-
