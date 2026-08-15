@@ -192,9 +192,20 @@ def _agent_cookie():
     restarts (not randomised at startup) is deliberate: a restarted agent
     protecting the same pair must still recognise, and be able to
     withdraw, flows a prior instance of itself installed before the
-    restart."""
+    restart. Uses the full 64-bit width of OpenFlow's cookie field (16 hex
+    digits of the SHA-256 digest, not 8/32 bits as an earlier revision
+    took) -- confirmed empirically that `ovs-ofctl add-flow`/`dump-flows`/
+    a cookie-masked `del-flows` all accept and correctly round-trip a full
+    64-bit cookie value unchanged. A 32-bit truncation was still
+    deterministic and pair-scoped, just with a needlessly higher collision
+    probability between two different pairs than the field width allows
+    for no benefit -- widening it is a strict improvement, not a new
+    guarantee: this is deterministic scoping between COOPERATING agents in
+    this paper's declared one-process-per-pair deployment model, not a
+    cryptographic uniqueness or security guarantee against an adversarial
+    or colluding process choosing the same pair on purpose."""
     digest = hashlib.sha256(f"{SOURCE}->{DEST}".encode()).hexdigest()
-    return int(digest[:8], 16)
+    return int(digest[:16], 16)
 
 
 def path_to_flows(path):
@@ -315,23 +326,63 @@ def apply_flow(action, bridge, arg):
     return True
 
 
-def install_path(path):
-    """Returns True only if every flow-add call for `path` succeeded, and
-    none of them would have overwritten a conflicting flow entry a
-    different process already installed at the same priority/match
-    (Section 5.1's forwarding-consistency check). Before every add, queries
-    _conflicting_flow_cookie() for the exact match this flow is about to
-    use; if that match is already occupied by a flow bearing some other
-    cookie -- installed by a different DAIM-OS process, not a prior
-    installation by this same agent -- the add is skipped and the whole
-    call is treated as failed, exactly like a real apply_flow() failure,
-    logging forwarding_conflict_rejected instead of silently overwriting
-    it. A pre-check that could not be completed (_ForwardingCheckError) is
-    treated the same way: fail safe, since an unreadable switch state is a
-    possible conflict, not a confirmed absence of one."""
+def install_path(path, old_path=None):
+    """Returns (ok, staged): `ok` is True only if every flow-add call for
+    `path` succeeded, and none of them would have overwritten a
+    conflicting flow entry a different process already installed at the
+    same priority/match (Section 5.1's forwarding-consistency check).
+    `staged` is the list of (bridge, flow) pairs THIS call actually
+    confirmed installed via a successful `apply_flow("add", ...)` call --
+    not simply every flow `path_to_flows(path)` would produce. A flow
+    rejected by the forwarding-consistency pre-check (a live conflict, or
+    the pre-check itself failing) never reaches `apply_flow()` at all, so
+    it is excluded from `staged`; a caller rolling back a failed attempt
+    (`_rollback_staged_flows()`, below) needs this distinction, since
+    "restore whatever this attempt might have touched" and "restore
+    everything `path` would ever produce" are not the same operation --
+    acting on a match this attempt never actually reached would overwrite
+    whatever is legitimately there now, which could be exactly the foreign
+    flow the forwarding-consistency check just correctly refused to
+    overwrite in the first place.
+
+    `old_path`, when given (`execute_repair()`'s ongoing-repair case, not
+    `execute_startup_install()`'s initial-install case where there is no
+    prior path), identifies which of `path`'s own flows share a match with
+    a currently-active flow -- the boundary-hop collision documented in
+    `test_boundary_hop_flow_match_collides_across_alternate_paths`, where
+    `old_path` and `path` both use the exact same `(cookie, priority,
+    in_port)` at the switch attached to SOURCE and the one attached to
+    DEST, since the host-attachment port never changes across alternate
+    routes. Those specific flows are staged LAST, after every
+    non-colliding flow has succeeded: a colliding flow's `add-flow`
+    immediately repoints that switch's LIVE forwarding action away from
+    `old_path` (Section 4.6's confirmed replace-in-place semantics), so
+    installing every other, purely-additive flow first -- which has zero
+    effect on live traffic, since nothing upstream of them is forwarding
+    through them yet -- means a mid-staging failure on any of THOSE flows
+    never touches `old_path`'s live forwarding at all. Even a failure on
+    one of the (at most two) final colliding flows leaves the other,
+    already-successful one active with no inconsistency: the SOURCE-facing
+    collision only affects the forward direction, the DEST-facing
+    collision only the reverse, and each direction's own non-colliding
+    hops were already fully staged beforehand -- so a direction whose
+    boundary flow succeeded is immediately fully functional via the new
+    path, while a direction whose boundary flow did not yet run (or
+    failed) is untouched and still fully functional via the old path. This
+    is what makes the protocol genuinely make-before-break, not merely
+    eventually-consistent-via-rollback."""
     my_cookie = f"{_agent_cookie():x}"
+    flows = path_to_flows(path)
+    if old_path is not None:
+        old_matches = {
+            (bridge, _delete_match(flow)) for bridge, flow in path_to_flows(old_path)
+        }
+        non_colliding = [(b, f) for b, f in flows if (b, _delete_match(f)) not in old_matches]
+        colliding = [(b, f) for b, f in flows if (b, _delete_match(f)) in old_matches]
+        flows = non_colliding + colliding
     ok = True
-    for bridge, flow in path_to_flows(path):
+    staged = []
+    for bridge, flow in flows:
         try:
             existing_cookie = _conflicting_flow_cookie(bridge, flow)
         except _ForwardingCheckError:
@@ -341,9 +392,11 @@ def install_path(path):
             log("forwarding_conflict_rejected", bridge=bridge, flow=flow, existing_cookie=existing_cookie)
             ok = False
             continue
-        if not apply_flow("add", bridge, flow):
+        if apply_flow("add", bridge, flow):
+            staged.append((bridge, flow))
+        else:
             ok = False
-    return ok
+    return ok, staged
 
 
 def _delete_match(flow):
@@ -428,31 +481,50 @@ def _withdraw_stale_path(old_path, new_path):
     return ok
 
 
-def _rollback_staged_path(new_path, old_path):
+def _rollback_staged_flows(staged, old_path):
     """The rollback half of execute_repair()'s two-phase protocol (Section
-    5.2), used when staging `new_path` fails partway through: undoes
-    whatever of `new_path` DID get staged, restoring `old_path` -- not
-    merely deleting `new_path`'s flows the way an earlier revision of this
-    rollback did. For a flow whose match does not collide with `old_path`,
-    deleting it is correct: it was purely additive, so there is nothing to
-    restore. For a flow whose match DOES collide with `old_path` (see
-    `_withdraw_stale_path` above), staging already overwrote that entry's
-    action in place; a plain delete there would remove the entry outright,
-    leaving `old_path` down a working flow at exactly that hop rather than
-    genuinely "left in place" as Section 5.2 requires. Instead, `old_path`'s
-    own original flow is RE-INSTALLED at that match -- an `add-flow` at the
-    same match, replacing the action back to what it was before staging
-    touched it, exactly mirroring how staging itself got there. Confirmed
-    live (alongside `_withdraw_stale_path`) that the naive
-    delete-everything-in-new_path version of this rollback leaves the
+    5.2), used when `install_path()` fails partway through: undoes exactly
+    the flows that specific call's own `staged` return value says it
+    actually confirmed installed -- not every flow the intended new path
+    would ever produce. An earlier revision rolled back by recomputing
+    `path_to_flows(new_path)` from scratch, which is wrong whenever a flow
+    was rejected before ever reaching `apply_flow()` (Section 5.1's
+    forwarding-consistency pre-check): that flow was never staged, so
+    acting on it during rollback is acting on state this attempt never
+    touched. Concretely, if a foreign-cookie flow already occupies a
+    boundary-hop match (Section 5.1) and the pre-check correctly refuses
+    to stage over it, a `staged`-blind rollback would still see that match
+    "colliding with `old_path`" and RE-INSTALL `old_path`'s own action
+    there via `add-flow` -- silently overwriting the very foreign flow the
+    forwarding-consistency check just correctly protected. Iterating only
+    `staged` excludes that match entirely, so rollback never touches it.
+
+    For a staged flow whose match does not collide with `old_path` (or
+    `old_path` is `None` -- no prior path to restore anything to, e.g.
+    following a failed `execute_startup_install()`), deleting it is
+    correct: it was purely additive, so there is nothing to restore. For a
+    staged flow whose match DOES collide with `old_path` (see
+    `_withdraw_stale_path()` above), staging already overwrote that
+    entry's action in place; a plain delete there would remove the entry
+    outright, leaving `old_path` down a working flow at exactly that hop
+    rather than genuinely "left in place" as Section 5.2 requires.
+    Instead, `old_path`'s own original flow is RE-INSTALLED at that match
+    -- an `add-flow` call, replacing the action back to what it was before
+    staging touched it, exactly mirroring how staging itself got there.
+    Confirmed live (alongside `_withdraw_stale_path()`) that the naive
+    delete-everything-attempted version of this rollback leaves the
     colliding entry missing (not restored), the same live blackhole its
-    commit-side counterpart has."""
-    old_by_match = {
-        (bridge, _delete_match(flow)): (bridge, flow)
-        for bridge, flow in path_to_flows(old_path)
-    }
+    commit-side counterpart has. Returns True only if every rollback call
+    (restore or delete) succeeded; the caller (`execute_repair()`) must
+    not claim `old_path` is confirmed intact if this returns False."""
+    old_by_match = {}
+    if old_path is not None:
+        old_by_match = {
+            (bridge, _delete_match(flow)): (bridge, flow)
+            for bridge, flow in path_to_flows(old_path)
+        }
     ok = True
-    for bridge, flow in path_to_flows(new_path):
+    for bridge, flow in staged:
         match = _delete_match(flow)
         collision = old_by_match.get((bridge, match))
         if collision is not None:
@@ -467,31 +539,36 @@ def _rollback_staged_path(new_path, old_path):
 def execute_repair(decision, current_path):
     """Executes the I/O for a "repair" decision using the two-phase
     prepare/commit protocol Section 5.2 specifies: the new path's flows are
-    staged (installed) FIRST, and the old path's flows are only withdrawn
-    -- "commit" -- once every new-path install call has actually succeeded.
+    staged (installed) FIRST, in an order that defers the boundary-hop
+    collision matches to last (`install_path(new_path, old_path=current_path)`,
+    see its docstring), and the old path's flows are only withdrawn --
+    "commit" -- once every new-path install call has actually succeeded.
     An earlier revision withdrew the old path unconditionally BEFORE
     attempting the new install, so a partial installation failure left the
     switches holding neither the old path nor the new one, and the only
     honest thing that revision could report was `current_path=None`
-    ("forwarding state is not reliably known"). Staging first instead means
-    a failed install never touches the old path at all -- except at the
-    boundary-hop matches `_rollback_staged_path()`/`_withdraw_stale_path()`
-    (above) exist specifically to handle: SOURCE's and DEST's attached
-    switches each have one flow whose match is identical across every
-    alternate path (the host-attachment port never changes), so staging
-    already updated that entry in place, and a plain
-    `withdraw_path()`/delete-everything-staged rollback would delete that
-    entry outright rather than leave (commit) or restore (rollback) it --
-    confirmed as a real live blackhole against the multi-OVS testbed before
-    these two helpers replaced the naive plain-`withdraw_path()` calls an
-    earlier revision of this function used. On failure, `current_path`
-    stays unchanged -- not `None` -- because `old_path` is now genuinely
-    still known to be the switches' actual forwarding state, confirmed
-    untouched (or, for the boundary hop, actively restored) by this
-    attempt. A `None` `current_path` -- e.g. following a failed
-    `execute_startup_install()`, where there never was an old path to
-    preserve -- has nothing to protect, so rollback falls back to a plain
-    `withdraw_path(new_path)` in that case.
+    ("forwarding state is not reliably known").
+
+    On a staging failure, rollback (`_rollback_staged_flows()`) acts only
+    on the flows `install_path()` itself confirmed were actually staged,
+    not on the full intended new path -- a flow the forwarding-consistency
+    check rejected before ever calling `apply_flow()` was never touched by
+    this attempt, and rolling it back anyway could overwrite a foreign
+    flow that check just correctly protected (see `install_path()` and
+    `_rollback_staged_flows()` docstrings). Rollback's own result is not
+    discarded either: an earlier revision of this function called the
+    rollback helper for its side effect only and unconditionally reported
+    `current_path` as the untouched, confirmed-intact old path -- but if
+    rollback itself fails partway through (a delete or restore call times
+    out), that claim is exactly the kind of false "logical state says X
+    but the switches don't" gap this whole section exists to close.
+    `current_path` becomes `None` and a distinct `repair_rollback_incomplete`
+    event is reported whenever rollback itself did not fully succeed;
+    `maybe_retry_repair()` then picks up the now-genuinely-unknown state on
+    the next tick, exactly as it already does for any other `None`
+    `current_path`. Only when rollback itself is fully confirmed does
+    `current_path` stay at the old path, since only then is it genuinely
+    known to be the switches' actual forwarding state again.
 
     If staging succeeds but the commit step (withdrawing the old path)
     then fails partway through, forwarding is still correct -- the new
@@ -505,13 +582,16 @@ def execute_repair(decision, current_path):
     log."""
     new_path = decision["new_path"]
     repair_start_ns = time.perf_counter_ns()
-    install_ok = install_path(new_path)
+    install_ok, staged = install_path(new_path, old_path=current_path)
     if not install_ok:
-        if current_path is None:
-            withdraw_path(new_path)
-        else:
-            _rollback_staged_path(new_path, current_path)
+        rollback_ok = _rollback_staged_flows(staged, current_path)
         repair_end_ns = time.perf_counter_ns()
+        if not rollback_ok:
+            return None, "repair_rollback_incomplete", {
+                "attempted_path": new_path, "prior_path": current_path,
+                "install_ok": False, "rollback_ok": False,
+                "repair_start_ns": repair_start_ns, "repair_end_ns": repair_end_ns,
+            }
         return current_path, "repair_incomplete", {
             "attempted_path": new_path, "prior_path": current_path,
             "install_ok": False,
@@ -543,9 +623,13 @@ def execute_startup_install(current_path, down_edges):
     the startup path by a second look at the same review.
 
     On failure, whatever flows DID get staged before the failure are rolled
-    back (`withdraw_path(current_path)`) -- there is no old path to
-    preserve at startup the way `execute_repair()`'s two-phase protocol
-    (Section 5.2) preserves one for an ongoing repair, but the same
+    back (`_rollback_staged_flows(staged, None)` -- only the flows this
+    specific attempt actually confirmed installed, see `install_path()`'s
+    docstring, not every flow the intended path would ever produce) --
+    there is no old path to preserve at startup the way `execute_repair()`'s
+    two-phase protocol (Section 5.2) preserves one for an ongoing repair
+    (`old_path=None`, so every staged flow is purely additive cleanup, no
+    restore-on-collision logic applies), but the same
     don't-leave-partial-flows-behind principle applies, so this degenerate
     "no old path" case is cleaned up the same way rather than left as a mix
     of installed and missing flows. The returned current_path is `None`,
@@ -557,12 +641,13 @@ def execute_startup_install(current_path, down_edges):
     startup" versus "this failure happened during an ongoing repair".
     Returns (new_current_path, event_name, event_fields) for the caller to
     log."""
-    if install_path(current_path):
+    install_ok, staged = install_path(current_path)
+    if install_ok:
         return current_path, "agent_started", {
             "initial_path": current_path,
             "down_edges": [list(edge) for edge in down_edges],
         }
-    withdraw_path(current_path)
+    _rollback_staged_flows(staged, None)
     return None, "startup_install_incomplete", {
         "attempted_path": current_path,
         "down_edges": [list(edge) for edge in down_edges],

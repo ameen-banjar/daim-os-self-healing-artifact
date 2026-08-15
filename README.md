@@ -57,7 +57,7 @@ uses them.
   performs the actual OVSDB/adapter I/O. Hold-down state is keyed by physical
   edge (the frozenset of the two switches a link connects), not by interface
   name, since v0.3.0 (see below).
-- `network/test_daim_link_agent.py` — twenty-seven pure-logic unit tests, runnable
+- `network/test_daim_link_agent.py` — twenty-nine pure-logic unit tests, runnable
   with plain `python3` and no Mininet/OVS/OVSDB: (1) BFS path computation
   against hand-verified expected flow sets; (2) the hold-down state machine
   driven through a synthetic seven-transition flapping-link sequence, with
@@ -107,7 +107,14 @@ uses them.
   (`_withdraw_stale_path()`) and rollback (`_rollback_staged_path()`)
   steps, confirming a boundary-hop collision is skipped (commit) or
   restored via `add-flow` (rollback) rather than deleted outright
-  (v0.12.0, see below).
+  (v0.12.0); (28) confirming rollback never acts on a match this attempt
+  never actually staged (e.g. rejected by the forwarding-consistency
+  check), even if it collides with `old_path`, so rollback cannot
+  overwrite a foreign flow that check just protected; (29) confirming
+  `install_path()` stages boundary-hop colliding flows LAST, after every
+  purely-additive flow has already succeeded, so `old_path` stays fully
+  live and correct for as long as possible during staging (v0.13.0, see
+  below).
 - `network/test_stage3_startup_already_down.py` — a regression test for a
   bug in the startup live-network harness itself (v0.6.0, see below), kept
   separate from `test_daim_link_agent.py` since it tests the harness, not
@@ -150,6 +157,55 @@ uses them.
   `analysis/paper3_analysis.py` from the real raw data and the real output of
   the hold-down unit test (nothing in these figures is hand-drawn or
   invented; re-run the script to regenerate them from source).
+
+## Rollback-protocol correctness, closed by live testing, not by trusting the unit tests (v0.13.0)
+
+A sixth external review pass, this time directed specifically at the two-phase rollback protocol
+v0.12.0 had just shipped -- reading the code again after it was already tested and live-verified,
+not accepting that as the end of the story. Found and closed three further gaps, each one level
+deeper than the last, the same pattern that closed v0.9.0/v0.10.0's execute_repair() gaps two rounds
+in a row:
+
+- **Rollback's own result was discarded.** `execute_repair()` called `_rollback_staged_path()` for
+  its side effect only and unconditionally reported the caller's prior `current_path` as confirmed
+  intact, regardless of whether the rollback calls themselves actually succeeded. Fixed: a distinct
+  `repair_rollback_incomplete` event and `current_path=None` whenever rollback itself does not fully
+  complete, picked up by `maybe_retry_repair()` on the next tick exactly like any other unknown
+  state.
+- **Rollback acted on the intended new path, not on what staging actually touched.**
+  `install_path()` returned only a success/failure boolean; on a staging failure, rollback
+  recomputed the full intended path from scratch and rolled back every flow it would ever produce --
+  including one the forwarding-consistency check (v0.12.0) had rejected before ever calling
+  `apply_flow()` for it. If that rejected flow sat at a boundary-hop collision match, a
+  `staged`-blind rollback would still "restore" `old_path`'s action there via `add-flow`, silently
+  overwriting the very foreign flow the forwarding-consistency check had just correctly refused to
+  overwrite -- defeating that check through its own supposed safety net. Fixed: `install_path()` now
+  returns `(ok, staged)`, the actual list of flows this call confirmed installed, and
+  `_rollback_staged_flows()` (renamed from `_rollback_staged_path()`) acts only on that list.
+- **Staging itself repointed live traffic before the new path was ready.** An earlier
+  `install_path()` staged flows in `path_to_flows()`'s natural SOURCE-to-DEST order, so the
+  SOURCE-facing boundary flow (which immediately repoints that switch's live forwarding action)
+  could be staged before the rest of the new path was even attempted. Fixed: `install_path(new_path,
+  old_path=current_path)` now stages every non-colliding, purely-additive flow FIRST -- these have
+  zero effect on live traffic until the boundary switches are repointed -- and defers the (at most
+  two) boundary-hop colliding flows to the very end, so `old_path` stays fully live and correct for
+  as long as possible during staging.
+
+All three fixes were re-verified against the same live fault injection (a real link killed on the
+multi-OVS testbed) that found v0.12.0's original boundary-hop blackhole, confirming both the
+ordinary repair path and the new edge cases behave correctly. Also this round: `_agent_cookie()`
+widened from a truncated 32-bit value to the full 64-bit OpenFlow cookie-field width (confirmed
+empirically that `ovs-ofctl` round-trips a full 64-bit cookie correctly), reducing the collision
+probability between two different protected pairs; and the forwarding-consistency check's
+documentation corrected to state precisely what it guarantees (a conflict present at check time is
+detected and rejected) rather than implying an atomic, race-free guarantee the
+`dump-flows`-then-`add-flow` sequence does not actually provide against a concurrent writer -- this
+paper's declared deployment model is one process per protected pair, not concurrent multi-client
+coordination on a shared match.
+
+New unit tests: rollback ignores a match this attempt never actually staged (confirming the
+foreign-flow-protection corner case above); `install_path()` stages boundary-hop collisions last.
+29/29 tests pass (2 new).
 
 ## Pair-scoped cookies, reconnect, forwarding consistency, and two-phase rollback (v0.12.0)
 

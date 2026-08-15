@@ -6,10 +6,11 @@ authors:
   - family-names: Banjar
     given-names: Ameen
     orcid: "https://orcid.org/0000-0002-0871-5153"
-version: 0.12.0
+version: 0.13.0
 date-released: 2026-08-15
 license: Apache-2.0
-doi: 10.5281/zenodo.21949036
+# doi: TODO -- fill in the v0.13.0 version-specific DOI once this tag's
+# release is minted by Zenodo. v0.12.0 DOI: 10.5281/zenodo.21949036.
 # v0.11.0 DOI: 10.5281/zenodo.21945308.
 # v0.10.0 DOI: 10.5281/zenodo.21940583. v0.9.0 DOI: 10.5281/zenodo.21940478.
 # v0.8.0 DOI: 10.5281/zenodo.21939224. v0.7.0 DOI: 10.5281/zenodo.21924978.
@@ -156,7 +157,31 @@ abstract: >-
   into main(), gated on execute_repair() reporting an actual commit,
   re-verified live by observing correct suppression of the same physical
   link's other interface reporting the identical fault moments later.
-  Contains pure-logic
+  v0.13.0 closes three further gaps in this same rollback protocol, found
+  by a sixth review pass reading the code again after it was already
+  tested and live-verified: rollback's own result was previously
+  discarded, so a rollback that itself failed partway through was reported
+  as a confirmed-intact old path anyway -- fixed with a distinct
+  repair_rollback_incomplete event and current_path=None whenever rollback
+  does not fully succeed. Rollback recomputed the intended new path from
+  scratch instead of acting on what install_path() actually confirmed
+  staged, meaning a flow the forwarding-consistency check correctly
+  rejected could still be "restored" at a colliding boundary match --
+  silently overwriting the very foreign flow that check had just
+  protected -- fixed by having install_path() return the real staged list
+  and _rollback_staged_flows() (renamed from _rollback_staged_path()) act
+  only on it. And staging installed flows in natural SOURCE-to-DEST order
+  rather than deferring boundary-hop collisions to last, so a live switch
+  could repoint onto the still-incomplete new path before the rest of it
+  was ready -- fixed with old_path-aware staging order, non-colliding
+  flows first. All three re-verified against the same live fault injection
+  that found v0.12.0's original blackhole. Also this round: _agent_cookie()
+  widened from a truncated 32-bit value to the full 64-bit OpenFlow
+  cookie-field width; and the forwarding-consistency check's documentation
+  corrected to state precisely what it guarantees (a conflict present at
+  check time is detected and rejected, not an atomic race-free guarantee
+  against a concurrent writer -- consistent with this paper's declared
+  one-process-per-pair deployment model). Contains pure-logic
   unit tests for the path computation and all hold-down/startup behaviours
   (suppression, stale-state reconciliation, cross-interface coverage,
   edge-confirmation, startup synchronization, link_state validation at both
@@ -164,8 +189,9 @@ abstract: >-
   partial-failure honesty, endpoint genericity, cookie-scoped deletion,
   startup-install honesty, repair-retry liveness, pair-scoped-cookie
   determinism, monitor-subprocess reconnect, forwarding-consistency
-  rejection, and two-phase rollback with boundary-hop-collision handling),
-  all
+  rejection, two-phase rollback with boundary-hop-collision handling, and
+  the rollback protocol's own result-honesty/staged-subset/staging-order
+  correctness), all
   runnable without Mininet/OVS; live-network flapping-link,
   startup-already-down, and multi-OVS-deployment scripts and their raw data
   and event logs across every pre-fix and post-fix run, retained side by

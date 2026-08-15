@@ -816,12 +816,18 @@ def test_execute_repair_reports_partial_failure_honestly():
     the old withdraw-first order, a failed install is confirmed NOT to
     have disturbed it, and whatever new-path flows DID get staged before
     the failure must be rolled back (withdrawn) rather than left as
-    partial garbage on the switches. If staging succeeds but the commit
-    step (withdrawing the old path) then fails, forwarding is still
-    correct -- traffic follows the fully-staged new path -- so
-    `current_path` advances to the new path, but under the distinct
-    `repair_installed_stale_withdraw` event, not a clean `repair_installed`,
-    since the old path's flows are left behind uncleaned."""
+    partial garbage on the switches. If the ROLLBACK itself then fails to
+    fully complete, `current_path` must NOT be reported as the old path --
+    an earlier revision of this fix discarded the rollback helper's return
+    value and unconditionally claimed the old path was confirmed intact
+    regardless, the same class of "logical state vs actual switch state"
+    gap this whole section exists to close, found one level deeper on a
+    second look. If staging succeeds but the commit step (withdrawing the
+    old path) then fails, forwarding is still correct -- traffic follows
+    the fully-staged new path -- so `current_path` advances to the new
+    path, but under the distinct `repair_installed_stale_withdraw` event,
+    not a clean `repair_installed`, since the old path's flows are left
+    behind uncleaned."""
     saved_apply_flow = daim_link_agent.apply_flow
     saved_check = daim_link_agent._conflicting_flow_cookie
     old_path = ["s1", "s2", "s4"]
@@ -845,9 +851,9 @@ def test_execute_repair_reports_partial_failure_honestly():
         # Two-phase order means install_path(new_path) runs BEFORE the old
         # path is touched at all, so the old path must come back exactly
         # as it was -- including at the boundary-hop matches s1 and s4
-        # share with new_path, which _rollback_staged_path() must RESTORE
+        # share with new_path, which _rollback_staged_flows() must RESTORE
         # (re-install old_path's own action), not merely delete (see
-        # test_rollback_staged_path_restores_boundary_hop_collisions below
+        # test_rollback_staged_flows_restores_boundary_hop_collisions below
         # for that mechanism in isolation; a real live blackhole at exactly
         # these two matches was found and fixed this round).
         install_calls = []
@@ -893,11 +899,49 @@ def test_execute_repair_reports_partial_failure_honestly():
         assert fields["path"] == new_path
         assert fields["stale_path"] == old_path
 
+        # Staging fails (s3) AND the resulting rollback itself fails too:
+        # the restore-add for the boundary-hop collision at s1 (undoing
+        # what staging did, re-installing old_path's own action there)
+        # times out. An earlier revision discarded the rollback helper's
+        # own return value and unconditionally reported old_path as
+        # confirmed intact regardless -- exactly the same class of false
+        # "logical state vs actual switch state" gap this whole section
+        # exists to close, just one level deeper (in the rollback path
+        # itself). current_path must become None, under a distinct
+        # repair_rollback_incomplete event, not silently claim old_path is
+        # fine.
+        def failing_install_and_rollback(action, bridge, arg):
+            if action == "add" and bridge == "s3":
+                return False  # staging fails at s3
+            if action == "add" and bridge == "s1" and "output:2" in arg:
+                # This is old_path's own s1-forward action (in_port=1,
+                # actions=output:2) -- the rollback restore-add for the
+                # boundary-hop collision, not the staging add (which
+                # would carry new_path's output:3 action instead).
+                return False
+            return True
+
+        daim_link_agent.apply_flow = failing_install_and_rollback
+        result_path, event_name, fields = execute_repair(decision, old_path)
+        assert result_path is None, (
+            "a rollback that itself did not fully succeed must not claim "
+            f"old_path is confirmed intact -- got {result_path!r}"
+        )
+        assert event_name == "repair_rollback_incomplete", (
+            "a failed rollback must be reported under a distinct event name, "
+            "not silently folded into repair_incomplete"
+        )
+        assert fields["install_ok"] is False
+        assert fields["rollback_ok"] is False
+        assert fields["attempted_path"] == new_path
+        assert fields["prior_path"] == old_path
+
         # execute_repair(decision, None) -- e.g. a retry following a failed
         # startup install with no old path at all -- must not crash:
-        # withdraw_path(None) has nothing known to withdraw.
+        # _rollback_staged_flows(staged, None) has no prior path to
+        # restore anything to.
         daim_link_agent.apply_flow = lambda action, bridge, arg: True
-        assert daim_link_agent.withdraw_path(None) is True
+        assert daim_link_agent._rollback_staged_flows([], None) is True
         result_path, event_name, fields = execute_repair(decision, None)
         assert result_path == new_path
         assert event_name == "repair_installed"
@@ -907,9 +951,12 @@ def test_execute_repair_reports_partial_failure_honestly():
 
     print("daim_link_agent execute_repair two-phase rollback regression test: "
           "PASS -- a staging failure rolls back the partially-staged new path "
-          "and retains the untouched old path; a commit-step failure still "
-          "advances current_path but under a distinct stale-withdraw event; "
-          "and a None prior path does not crash a subsequent repair attempt.")
+          "and retains the untouched old path; a rollback that itself fails "
+          "reports current_path=None under a distinct event rather than "
+          "claiming the old path is confirmed intact; a commit-step failure "
+          "still advances current_path but under a distinct stale-withdraw "
+          "event; and a None prior path does not crash a subsequent repair "
+          "attempt.")
 
 
 def test_withdraw_stale_path_skips_boundary_hop_collisions():
@@ -968,8 +1015,8 @@ def test_withdraw_stale_path_skips_boundary_hop_collisions():
           "never deletes a match new_path's staged flows also occupy.")
 
 
-def test_rollback_staged_path_restores_boundary_hop_collisions():
-    """_rollback_staged_path(new_path, old_path) -- execute_repair()'s
+def test_rollback_staged_flows_restores_boundary_hop_collisions():
+    """_rollback_staged_flows(staged, old_path) -- execute_repair()'s
     rollback step on a staging failure -- must RESTORE old_path's original
     action at a match the two paths share, not merely delete it. A flow
     whose match does not collide with old_path is purely additive (staging
@@ -980,16 +1027,22 @@ def test_rollback_staged_path_restores_boundary_hop_collisions():
     missing a working flow at exactly that hop rather than genuinely "left
     in place" as Section 5.2 requires. This was confirmed live alongside
     the commit-side fix: the naive delete-everything-in-new_path rollback
-    left the same two boundary matches completely empty."""
+    left the same two boundary matches completely empty. Exercised here
+    with every one of new_path's flows as `staged` (as if the whole new
+    path got confirmed installed before some later, unmodelled failure);
+    the narrower case where only SOME of new_path's flows were ever
+    actually staged is covered separately by
+    test_rollback_staged_flows_ignores_never_staged_matches below."""
     old_path = ["s1", "s2", "s4"]
     new_path = ["s1", "s3", "s4"]
+    staged = path_to_flows(new_path)
     calls = []
     saved_apply_flow = daim_link_agent.apply_flow
     try:
         daim_link_agent.apply_flow = lambda action, bridge, arg: (
             calls.append((action, bridge, arg)) or True
         )
-        ok = daim_link_agent._rollback_staged_path(new_path, old_path)
+        ok = daim_link_agent._rollback_staged_flows(staged, old_path)
         assert ok is True
 
         old_by_match = {
@@ -1027,10 +1080,81 @@ def test_rollback_staged_path_restores_boundary_hop_collisions():
     finally:
         daim_link_agent.apply_flow = saved_apply_flow
 
-    print("daim_link_agent _rollback_staged_path regression test: PASS -- "
+    print("daim_link_agent _rollback_staged_flows regression test: PASS -- "
           "a boundary-hop match shared with old_path is restored to "
           "old_path's own action via add-flow, while a purely-additive "
           "staged flow is deleted as ordinary rollback cleanup.")
+
+
+def test_rollback_staged_flows_ignores_never_staged_matches():
+    """_rollback_staged_flows(staged, old_path) must act ONLY on the flows
+    a failed install_path() call actually confirmed staged -- passed in as
+    `staged` -- never on the full set path_to_flows(new_path) would
+    produce. Found by review: install_path() can reject a flow before ever
+    calling apply_flow() (Section 5.1's forwarding-consistency pre-check),
+    so that flow was never touched by this attempt at all. If rollback
+    recomputed from the intended new path instead of the actual `staged`
+    list, a rejected flow at a boundary-hop collision match (see
+    test_withdraw_stale_path_skips_boundary_hop_collisions) would still
+    look like it "collides with old_path", and rollback would RE-INSTALL
+    old_path's action there via add-flow -- silently overwriting the very
+    foreign flow the forwarding-consistency check just correctly refused
+    to overwrite in the first place. This test simulates exactly that:
+    new_path's SOURCE-facing (boundary) flow is excluded from `staged` (as
+    if the forwarding-consistency check had rejected it), and confirms
+    _rollback_staged_flows() issues no call at all for that match -- not a
+    delete, and critically not an add-flow "restore" that would clobber
+    whatever is actually sitting there now."""
+    old_path = ["s1", "s2", "s4"]
+    new_path = ["s1", "s3", "s4"]
+    all_new_flows = path_to_flows(new_path)
+
+    old_by_match = {
+        (bridge, _delete_match(flow)) for bridge, flow in path_to_flows(old_path)
+    }
+    new_by_match = {
+        (bridge, _delete_match(flow)): (bridge, flow) for bridge, flow in all_new_flows
+    }
+    colliding_keys = set(old_by_match) & set(new_by_match)
+    assert colliding_keys, "expected old_path and new_path to share a boundary-hop match"
+    rejected_key = next(iter(colliding_keys))
+    rejected_bridge, rejected_flow = new_by_match[rejected_key]
+
+    # staged = everything install_path() would have produced EXCEPT the
+    # boundary-hop flow the forwarding-consistency check rejected.
+    staged = [
+        (bridge, flow) for bridge, flow in all_new_flows
+        if (bridge, flow) != (rejected_bridge, rejected_flow)
+    ]
+    assert len(staged) == len(all_new_flows) - 1
+
+    calls = []
+    saved_apply_flow = daim_link_agent.apply_flow
+    try:
+        daim_link_agent.apply_flow = lambda action, bridge, arg: (
+            calls.append((action, bridge, arg)) or True
+        )
+        ok = daim_link_agent._rollback_staged_flows(staged, old_path)
+        assert ok is True
+
+        touched = {(bridge, arg) for action, bridge, arg in calls}
+        rejected_bridge_out, rejected_match = rejected_key
+        assert (rejected_bridge_out, rejected_match) not in touched, (
+            "rollback must never touch a match this attempt never actually "
+            f"staged, even if it collides with old_path: {touched}"
+        )
+        # Every other (genuinely staged) flow must still be rolled back
+        # normally -- this isn't a case of rollback doing nothing at all.
+        assert touched, "rollback must still act on the flows that WERE staged"
+    finally:
+        daim_link_agent.apply_flow = saved_apply_flow
+
+    print("daim_link_agent _rollback_staged_flows staged-subset regression "
+          "test: PASS -- a boundary-hop match this attempt never actually "
+          "staged (e.g. rejected by the forwarding-consistency pre-check) "
+          "is never touched by rollback, even though it collides with "
+          "old_path -- preventing rollback from overwriting a foreign flow "
+          "the conflict check correctly protected.")
 
 
 def test_bfs_and_flows_use_declared_source_dest_not_hardcoded_host_names():
@@ -1568,7 +1692,7 @@ def test_install_path_rejects_forwarding_conflict():
         def conflict_on_s3(bridge, flow):
             return "deadbeef" if bridge == "s3" else None
         daim_link_agent._conflicting_flow_cookie = conflict_on_s3
-        ok = daim_link_agent.install_path(path)
+        ok, staged = daim_link_agent.install_path(path)
         assert ok is False, (
             "a foreign-cookie conflict on any switch must fail the whole "
             "install_path() call"
@@ -1583,15 +1707,24 @@ def test_install_path_rejects_forwarding_conflict():
             "a different switch in the same path was rejected"
         )
         assert logged and logged[0]["existing_cookie"] == "deadbeef"
+        assert all(bridge != "s3" for bridge, _ in staged), (
+            "a rejected flow must never appear in the staged list -- a "
+            "rollback acting on `staged` must not believe it was installed"
+        )
+        assert {bridge for bridge, _ in staged} == {"s1", "s4"}, (
+            "staged must contain exactly the flows that were actually "
+            f"confirmed installed: {staged}"
+        )
 
         # Same cookie as this agent's own -- not a conflict, a legitimate
         # re-install proceeds normally.
         add_calls.clear()
         logged.clear()
         daim_link_agent._conflicting_flow_cookie = lambda bridge, flow: my_cookie
-        ok = daim_link_agent.install_path(path)
+        ok, staged = daim_link_agent.install_path(path)
         assert ok is True
         assert len(add_calls) == 6
+        assert len(staged) == 6
         assert logged == []
 
         # A pre-check that could not be completed at all must also block
@@ -1600,11 +1733,12 @@ def test_install_path_rejects_forwarding_conflict():
         def always_fails(bridge, flow):
             raise daim_link_agent._ForwardingCheckError()
         daim_link_agent._conflicting_flow_cookie = always_fails
-        ok = daim_link_agent.install_path(path)
+        ok, staged = daim_link_agent.install_path(path)
         assert ok is False
         assert add_calls == [], (
             "an incomplete pre-check must block the add, not silently proceed"
         )
+        assert staged == []
     finally:
         daim_link_agent.apply_flow = saved_apply_flow
         daim_link_agent.log = saved_log
@@ -1617,9 +1751,77 @@ def test_install_path_rejects_forwarding_conflict():
           "fails safe instead of proceeding.")
 
 
+def test_install_path_stages_boundary_collisions_last():
+    """install_path(new_path, old_path=...) must install every flow whose
+    match does NOT collide with old_path FIRST, and defer the (at most
+    two) boundary-hop colliding flows -- the ones that immediately repoint
+    a live switch's forwarding action away from old_path -- to the very
+    end. Found by review: an earlier revision installed new_path's flows
+    in path_to_flows()'s natural SOURCE-to-DEST order, so the SOURCE-facing
+    boundary flow could repoint live traffic onto the new path BEFORE the
+    rest of the new path was even staged, let alone confirmed -- a
+    transient window where forwarding could follow a still-incomplete new
+    path, even though a final failure would still correctly roll back to
+    old_path. Staging non-colliding flows first instead means old_path
+    stays fully live and correct for as long as possible: those flows have
+    zero effect on live traffic (nothing upstream forwards through them
+    yet), so a mid-staging failure among them never touches old_path's
+    live forwarding at all, and even the LAST two (colliding) calls are
+    each independently safe -- one governs the forward direction, the
+    other the reverse, and each direction's own non-colliding hops are
+    already staged by the time its boundary flow runs."""
+    old_path = ["s1", "s2", "s4"]
+    new_path = ["s1", "s3", "s4"]
+    old_matches = {
+        (bridge, _delete_match(flow)) for bridge, flow in path_to_flows(old_path)
+    }
+    new_flows = path_to_flows(new_path)
+    colliding_flows = [
+        (bridge, flow) for bridge, flow in new_flows
+        if (bridge, _delete_match(flow)) in old_matches
+    ]
+    assert len(colliding_flows) == 2, (
+        "expected exactly one boundary-hop collision each at the "
+        f"SOURCE-facing and DEST-facing switches: {colliding_flows}"
+    )
+
+    call_order = []
+    saved_apply_flow = daim_link_agent.apply_flow
+    saved_check = daim_link_agent._conflicting_flow_cookie
+    try:
+        daim_link_agent._conflicting_flow_cookie = lambda bridge, flow: None
+        daim_link_agent.apply_flow = lambda action, bridge, arg: (
+            call_order.append((bridge, arg)) or True
+        )
+        ok, staged = daim_link_agent.install_path(new_path, old_path=old_path)
+        assert ok is True
+        assert len(call_order) == 6
+
+        colliding_set = set(colliding_flows)
+        last_two = set(call_order[-2:])
+        assert last_two == colliding_set, (
+            "the two boundary-hop colliding flows must be staged LAST, "
+            f"not in path_to_flows()'s natural order: got {call_order}"
+        )
+        first_four = set(call_order[:4])
+        assert first_four == (set(new_flows) - colliding_set), (
+            "every non-colliding flow must be staged before either "
+            f"colliding flow: got {call_order}"
+        )
+    finally:
+        daim_link_agent.apply_flow = saved_apply_flow
+        daim_link_agent._conflicting_flow_cookie = saved_check
+
+    print("daim_link_agent install_path() staging-order regression test: "
+          "PASS -- boundary-hop colliding flows are staged last, after "
+          "every purely-additive flow has already succeeded, so old_path "
+          "stays fully live and correct for as long as possible during "
+          "staging.")
+
+
 def test_boundary_hop_flow_match_collides_across_alternate_paths():
     """Documents the root cause `_withdraw_stale_path()`/
-    `_rollback_staged_path()` (above) exist to handle: at the switch
+    `_rollback_staged_flows()` (above) exist to handle: at the switch
     directly attached to SOURCE and the switch directly attached to DEST,
     one of the two flow entries has a match -- (cookie, priority=100,
     in_port) -- that is IDENTICAL across every alternate path through that
@@ -1639,11 +1841,11 @@ def test_boundary_hop_flow_match_collides_across_alternate_paths():
     has committed. A naive commit/rollback that deletes by match alone does
     not undo that -- it deletes the entry outright rather than restoring or
     leaving it -- confirmed as a real live blackhole against the multi-OVS
-    testbed before `_withdraw_stale_path()`/`_rollback_staged_path()`
+    testbed before `_withdraw_stale_path()`/`_rollback_staged_flows()`
     replaced the naive plain-`withdraw_path()` calls an earlier revision of
     `execute_repair()` used; those two functions' own dedicated tests
     (`test_withdraw_stale_path_skips_boundary_hop_collisions`,
-    `test_rollback_staged_path_restores_boundary_hop_collisions`) confirm
+    `test_rollback_staged_flows_restores_boundary_hop_collisions`) confirm
     the fix. This test only documents that the collision itself exists and
     is exactly one flow per boundary switch, not two."""
     old_path = ["s1", "s2", "s4"]
@@ -1702,7 +1904,8 @@ def main():
     test_apply_flow_routes_remote_bridge_through_adapter()
     test_execute_repair_reports_partial_failure_honestly()
     test_withdraw_stale_path_skips_boundary_hop_collisions()
-    test_rollback_staged_path_restores_boundary_hop_collisions()
+    test_rollback_staged_flows_restores_boundary_hop_collisions()
+    test_rollback_staged_flows_ignores_never_staged_matches()
     test_bfs_and_flows_use_declared_source_dest_not_hardcoded_host_names()
     test_delete_match_scopes_by_cookie_not_bare_in_port()
     test_execute_startup_install_reports_partial_failure()
@@ -1712,6 +1915,7 @@ def main():
     test_monitor_link_rows_reconnects_on_stream_death()
     test_conflicting_flow_cookie_parses_dump_flows_output()
     test_install_path_rejects_forwarding_conflict()
+    test_install_path_stages_boundary_collisions_last()
     test_boundary_hop_flow_match_collides_across_alternate_paths()
 
 
