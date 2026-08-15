@@ -1,6 +1,6 @@
 rep,initial_path,repaired_path,detected_edge,detect_to_repair_start_ms,repair_action_ms,transition_suppressed,ping_consecutive_missing_pkts,ping_outage_bound_lower_ms,ping_outage_bound_upper_ms
-1,s1|s3|s4,s1|s3|s5|s4,s3-s4,0.096,198.546,s3-eth1,10,180,220
-2,s1|s3|s4,s1|s3|s5|s4,s3-s4,0.065,194.299,s3-eth1,9,160,200
-3,s1|s3|s4,s1|s3|s5|s4,s3-s4,0.059,191.581,s3-eth1,9,160,200
-4,s1|s3|s4,s1|s3|s5|s4,s3-s4,0.313,188.301,s3-eth1,9,160,200
-5,s1|s3|s4,s1|s3|s5|s4,s3-s4,0.126,184.693,s3-eth1,8,140,180
+1,s1|s3|s4,s1|s3|s5|s4,s3-s4,0.074,203.611,s3-eth1,10,180,220
+2,s1|s3|s4,s1|s3|s5|s4,s3-s4,0.097,223.068,s3-eth1,10,180,220
+3,s1|s3|s4,s1|s3|s5|s4,s3-s4,0.064,191.613,s3-eth1,9,160,200
+4,s1|s3|s4,s1|s3|s5|s4,s3-s4,0.061,202.858,s3-eth1,9,160,200
+5,s1|s3|s4,s1|s3|s5|s4,s3-s4,0.063,196.568,s3-eth1,10,180,220

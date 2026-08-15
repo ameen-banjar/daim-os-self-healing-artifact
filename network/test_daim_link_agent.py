@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pure-logic unit tests for daim_link_agent, independent of Mininet/OVS/OVSDB.
 
-Sixteen things are checked without a live network:
+Nineteen things are checked without a live network:
 1. `test_bfs_path_computation` -- the BFS-computed primary and alternate
    paths produce exactly the flow sets that were previously hand-written in
    stage3_link_recovery.py's install_primary()/install_alternate(), so the
@@ -76,7 +76,26 @@ Sixteen things are checked without a live network:
     topologies measured in this evidence set happen to use those names, so
     this never surfaced live, but a deployment declaring different host
     names via `load_topology_config()` would have hit a `KeyError` in
-    `path_to_flows()`."""
+    `path_to_flows()`.
+17. `test_delete_match_scopes_by_cookie_not_bare_in_port` -- `withdraw_path()`
+    deletes flows by an `AGENT_COOKIE` mask plus `in_port`, not a bare
+    `in_port` match, which non-strict `del-flows` would otherwise delete
+    for ANY flow sharing that port regardless of owner -- confirmed
+    empirically against a live OVS bridge with a real unrelated flow.
+18. `test_execute_startup_install_reports_partial_failure` -- the same
+    failure-honesty fix `execute_repair()` applies to the ongoing repair
+    path, applied to agent startup: `execute_startup_install()` only uses
+    the `agent_started` event name if the initial flow installation fully
+    succeeded; a partial failure is reported as `startup_install_incomplete`
+    with `current_path=None`, not a silent `agent_started`.
+19. `test_maybe_retry_repair_retries_until_success` -- a degraded
+    `current_path=None` is not a permanent dead end: `maybe_retry_repair()`,
+    called from `main()`'s periodic tick (not the OVSDB event branch),
+    retries a failed repair on later ticks until the underlying
+    flow-installation failure clears, with no new OVSDB event required to
+    trigger it -- closing a real liveness gap, since `decide_link_event()`
+    alone would never re-trigger a repair for an edge already in
+    `down_edges`."""
 import json
 import os
 
@@ -87,9 +106,13 @@ from daim_link_agent import (
     decide_link_event,
     down_edges_from_snapshot,
     execute_repair,
+    execute_startup_install,
+    maybe_retry_repair,
     path_to_flows,
     read_initial_snapshot,
     reconcile_expired_holddowns,
+    withdraw_path,
+    _delete_match,
     _monitored_ovsdb_targets,
     _ovsdb_target_for_interface,
     _owning_switch,
@@ -99,21 +122,21 @@ from daim_link_agent import (
 )
 
 EXPECTED_PRIMARY = {
-    ("s1", "priority=100,in_port=1,actions=output:2"),
-    ("s1", "priority=100,in_port=2,actions=output:1"),
-    ("s2", "priority=100,in_port=1,actions=output:2"),
-    ("s2", "priority=100,in_port=2,actions=output:1"),
-    ("s4", "priority=100,in_port=1,actions=output:3"),
-    ("s4", "priority=100,in_port=3,actions=output:1"),
+    ("s1", "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:2"),
+    ("s1", "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:1"),
+    ("s2", "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:2"),
+    ("s2", "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:1"),
+    ("s4", "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:3"),
+    ("s4", "cookie=0x5e1fea9e,priority=100,in_port=3,actions=output:1"),
 }
 
 EXPECTED_ALTERNATE = {
-    ("s1", "priority=100,in_port=1,actions=output:3"),
-    ("s1", "priority=100,in_port=3,actions=output:1"),
-    ("s3", "priority=100,in_port=1,actions=output:2"),
-    ("s3", "priority=100,in_port=2,actions=output:1"),
-    ("s4", "priority=100,in_port=2,actions=output:3"),
-    ("s4", "priority=100,in_port=3,actions=output:2"),
+    ("s1", "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:3"),
+    ("s1", "cookie=0x5e1fea9e,priority=100,in_port=3,actions=output:1"),
+    ("s3", "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:2"),
+    ("s3", "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:1"),
+    ("s4", "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:3"),
+    ("s4", "cookie=0x5e1fea9e,priority=100,in_port=3,actions=output:2"),
 }
 
 
@@ -773,10 +796,10 @@ def test_bfs_and_flows_use_declared_source_dest_not_hardcoded_host_names():
 
         flows = set(path_to_flows(path))
         assert flows == {
-            ("x1", "priority=100,in_port=1,actions=output:2"),
-            ("x1", "priority=100,in_port=2,actions=output:1"),
-            ("x2", "priority=100,in_port=1,actions=output:2"),
-            ("x2", "priority=100,in_port=2,actions=output:1"),
+            ("x1", "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:2"),
+            ("x1", "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:1"),
+            ("x2", "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:2"),
+            ("x2", "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:1"),
         }, (
             "path_to_flows() must resolve the declared SOURCE/DEST ('alpha'/'beta') "
             "to compute in_port/out_port, not crash or silently miscompute by "
@@ -790,6 +813,171 @@ def test_bfs_and_flows_use_declared_source_dest_not_hardcoded_host_names():
     print("daim_link_agent SOURCE/DEST genericity regression test: PASS -- "
           "bfs_path()/path_to_flows() work correctly for a topology whose "
           "hosts are not named 'h1'/'h2', instead of assuming those literal names.")
+
+
+def test_delete_match_scopes_by_cookie_not_bare_in_port():
+    """_delete_match() must scope deletion by AGENT_COOKIE plus in_port, not
+    a bare in_port match. An earlier revision derived the delete match by
+    stripping the add-form flow string down to whatever was left
+    (flow.split(",actions=")[0].split(",",1)[1]), which dropped both the
+    cookie AND the priority field, leaving only "in_port=N" -- confirmed
+    empirically against a live OVS bridge that this deletes ANY flow
+    sharing that in_port regardless of owner, priority, or match fields,
+    including a real unrelated flow another process installed. Confirmed
+    empirically that a cookie-mask delete (cookie=<AGENT_COOKIE>/-1,in_port=N)
+    leaves that same unrelated flow untouched. This test checks the string
+    construction and the resulting apply_flow() call; the live OVS
+    behaviour itself was verified directly against a running bridge, not
+    re-verified here (this repo has no OVS instance to test against in
+    plain unit tests)."""
+    flow = "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:2"
+    match = _delete_match(flow)
+    assert match == "cookie=0x5e1fea9e/-1,in_port=1", match
+    assert "priority" not in match, (
+        "non-strict del-flows rejects a literal priority= field outright "
+        "(confirmed empirically: 'ovs-ofctl: unknown keyword priority') "
+        "-- it must never appear in the delete match"
+    )
+
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        class Result:
+            returncode = 0
+            stderr = ""
+        return Result()
+
+    saved_run = daim_link_agent.subprocess.run
+    try:
+        daim_link_agent.subprocess.run = fake_run
+        withdraw_path(["s1", "s2", "s4"])
+        delete_calls = [c for c in calls if c[1] == "delete"]
+        assert delete_calls, "withdraw_path must issue delete calls"
+        for call in delete_calls:
+            match_arg = call[3]
+            assert match_arg.startswith("cookie=0x5e1fea9e/-1,in_port="), match_arg
+            assert "priority" not in match_arg
+    finally:
+        daim_link_agent.subprocess.run = saved_run
+
+    print("daim_link_agent cookie-scoped-deletion regression test: PASS -- "
+          "withdraw_path() deletes by AGENT_COOKIE + in_port, never a bare "
+          "in_port match or a rejected priority= field.")
+
+
+def test_execute_startup_install_reports_partial_failure():
+    """execute_startup_install() must not use the `agent_started` event
+    name, and must not report a non-None current_path, unless the initial
+    flow installation fully succeeded. An earlier revision called
+    install_path(current_path) at startup for its side effect only,
+    discarding whether it actually succeeded, so main() always logged
+    agent_started with the intended path regardless -- the same class of
+    defect execute_repair() fixes for the ongoing repair path, found here
+    on the startup path by a second look at the same review. On failure,
+    current_path must be None (not the attempted path) so
+    maybe_retry_repair() picks up the unfinished installation on a later
+    tick, exactly as it does for a failed ongoing repair."""
+    saved_apply_flow = daim_link_agent.apply_flow
+    down_edges = set()
+    initial_path = ["s1", "s3", "s4"]
+    try:
+        daim_link_agent.apply_flow = lambda action, bridge, arg: True
+        current_path, event_name, fields = execute_startup_install(initial_path, down_edges)
+        assert current_path == initial_path
+        assert event_name == "agent_started"
+        assert fields["initial_path"] == initial_path
+
+        daim_link_agent.apply_flow = lambda action, bridge, arg: not (action == "add" and bridge == "s3")
+        current_path, event_name, fields = execute_startup_install(initial_path, down_edges)
+        assert current_path is None, (
+            "current_path must be None, not the attempted initial path, when "
+            "the startup installation only partially succeeded"
+        )
+        assert event_name == "startup_install_incomplete", (
+            "a partially-failed startup installation must be reported under a "
+            "distinct event name, not silently logged as agent_started"
+        )
+        assert fields["attempted_path"] == initial_path
+    finally:
+        daim_link_agent.apply_flow = saved_apply_flow
+
+    print("daim_link_agent startup-install failure-honesty regression test: PASS -- "
+          "a partially-failed startup installation is reported as "
+          "startup_install_incomplete with current_path=None, not agent_started.")
+
+
+def test_maybe_retry_repair_retries_until_success():
+    """A degraded current_path=None (from a partial-failure repair, Section
+    4.6) must not be a permanent dead end. Found by review: decide_link_event()
+    only starts a repair on a "down" event for an edge NOT already in
+    down_edges -- but a failed repair's edge is already in down_edges by the
+    time execute_repair() runs, so a duplicate transition on the same edge,
+    or no further transition at all (the physical link stays down and
+    nothing about it changes again), would never re-trigger a repair
+    attempt through the event-driven path alone. maybe_retry_repair(),
+    called from main()'s periodic poll_interval tick (not the OVSDB event
+    branch), is what gives a transient flow-installation failure -- a
+    remote OVS instance briefly unreachable, a timeout -- a way to
+    eventually succeed once conditions improve, with no new OVSDB event
+    ever required. Simulates exactly the scenario found by review: down ->
+    repair -> forced install failure -> no new link-state transition ->
+    retry on a later tick -> still failing -> retry again -> succeeds."""
+    saved_apply_flow = daim_link_agent.apply_flow
+    down_edges = {frozenset({"s1", "s2"})}
+    try:
+        # Simulate the original partial-failure repair that leaves
+        # current_path=None (Section 4.6's fix).
+        daim_link_agent.apply_flow = lambda action, bridge, arg: not (action == "add" and bridge == "s3")
+        decision = {"action": "repair", "new_path": ["s1", "s3", "s4"]}
+        current_path, event_name, fields = execute_repair(decision, ["s1", "s2", "s4"])
+        assert current_path is None
+        assert event_name == "repair_incomplete"
+
+        # No new link-state transition arrives -- decide_link_event() would
+        # never re-trigger a repair for this edge (already in down_edges).
+        # A later periodic tick (standing in for main()'s poll_interval
+        # wake-up) must retry anyway, since the underlying failure is
+        # still present.
+        current_path, event_name, fields = maybe_retry_repair(current_path, down_edges)
+        assert current_path is None, (
+            "a retry against the still-failing adapter must stay degraded, "
+            "not silently give up or falsely claim success"
+        )
+        assert event_name == "repair_incomplete"
+
+        # Once the underlying failure clears (e.g. a remote instance
+        # becomes reachable again), the very next tick must succeed -- with
+        # no new OVSDB event ever having arrived for this edge.
+        daim_link_agent.apply_flow = lambda action, bridge, arg: True
+        current_path, event_name, fields = maybe_retry_repair(current_path, down_edges)
+        assert current_path == ["s1", "s3", "s4"], (
+            "a degraded current_path must not be a permanent dead end once "
+            "the underlying flow-installation problem clears"
+        )
+        assert event_name == "repair_installed"
+
+        # Once healthy, further ticks must be no-ops (nothing to retry).
+        current_path, event_name, fields = maybe_retry_repair(current_path, down_edges)
+        assert event_name is None
+        assert current_path == ["s1", "s3", "s4"]
+
+        # If BFS genuinely finds no path at all (not a flow-install
+        # problem), retrying must not loop pointlessly -- report a
+        # distinct event instead of repeatedly calling execute_repair.
+        unreachable_down_edges = {
+            frozenset({"s1", "s2"}), frozenset({"s1", "s3"}),
+        }
+        current_path, event_name, fields = maybe_retry_repair(None, unreachable_down_edges)
+        assert current_path is None
+        assert event_name == "repair_retry_no_path"
+    finally:
+        daim_link_agent.apply_flow = saved_apply_flow
+
+    print("daim_link_agent repair-retry liveness regression test: PASS -- "
+          "a degraded current_path=None is retried on later ticks until the "
+          "underlying flow-installation failure clears, with no new OVSDB "
+          "event required to trigger the retry.")
 
 
 def main():
@@ -809,6 +997,9 @@ def main():
     test_apply_flow_routes_remote_bridge_through_adapter()
     test_execute_repair_reports_partial_failure_honestly()
     test_bfs_and_flows_use_declared_source_dest_not_hardcoded_host_names()
+    test_delete_match_scopes_by_cookie_not_bare_in_port()
+    test_execute_startup_install_reports_partial_failure()
+    test_maybe_retry_repair_retries_until_success()
 
 
 if __name__ == "__main__":

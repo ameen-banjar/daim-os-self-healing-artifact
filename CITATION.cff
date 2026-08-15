@@ -6,10 +6,11 @@ authors:
   - family-names: Banjar
     given-names: Ameen
     orcid: "https://orcid.org/0000-0002-0871-5153"
-version: 0.10.0
+version: 0.11.0
 date-released: 2026-08-15
 license: Apache-2.0
-doi: 10.5281/zenodo.21940583
+# doi: TODO -- fill in the v0.11.0 version-specific DOI once this tag's
+# release is minted by Zenodo. v0.10.0 DOI: 10.5281/zenodo.21940583.
 # v0.9.0 DOI: 10.5281/zenodo.21940478. v0.8.0 DOI: 10.5281/zenodo.21939224.
 # v0.7.0 DOI: 10.5281/zenodo.21924978. v0.6.0 DOI: 10.5281/zenodo.21918394.
 # v0.5.0 DOI: 10.5281/zenodo.21912414. v0.4.0 DOI: 10.5281/zenodo.21910227.
@@ -103,12 +104,28 @@ abstract: >-
   every repetition -- false for repetition 5 by 4.69 ms, now stated
   correctly as 4-of-5 with an honest explanation (repair_end_ns marks
   control-plane completion, not necessarily the same instant as data-plane
-  restoration). Contains pure-logic
+  restoration). v0.11.0 fixes a third review pass's three further findings:
+  execute_repair()'s current_path=None (v0.10.0) was not itself a
+  guarantee of retry, since decide_link_event() never re-triggers a repair
+  for an edge already in down_edges -- fixed with maybe_retry_repair(),
+  called from main()'s periodic tick, retrying a degraded state until the
+  underlying failure clears with no new OVSDB event required; the startup
+  path had the identical false-success gap, fixed by
+  execute_startup_install() mirroring execute_repair()'s contract; and
+  withdraw_path() matched flow deletion far too broadly (a bare in_port
+  match, confirmed empirically to delete an unrelated flow sharing only
+  that port) -- fixed with OpenFlow cookie scoping (AGENT_COOKIE),
+  entirely within daim_link_agent.py, no adapter C-code change. The
+  cookie-scoping fix changes the wire-level flow-mod strings sent on every
+  call, so the n=5 multi-OVS measurement was re-run again: still 5/5
+  clean, mean repair-action time 203.54 ms (up from 191.48 ms
+  pre-cookie-scoping). Contains pure-logic
   unit tests for the path computation and all hold-down/startup behaviours
   (suppression, stale-state reconciliation, cross-interface coverage,
   edge-confirmation, startup synchronization, link_state validation at both
   startup and runtime, multi-OVS target routing, adapter unification,
-  partial-failure honesty, endpoint genericity), all
+  partial-failure honesty, endpoint genericity, cookie-scoped deletion,
+  startup-install honesty, repair-retry liveness), all
   runnable without Mininet/OVS; live-network flapping-link,
   startup-already-down, and multi-OVS-deployment scripts and their raw data
   and event logs across every pre-fix and post-fix run, retained side by

@@ -1,7 +1,8 @@
 # Multi-OVS Deployment Report
 
-Date: 14 August 2026 (updated same day after an architecture-consistency fix
-found by external review -- see "Adapter-unification fix" below)
+Date: 14 August 2026, updated 15 August 2026 after two further external
+review passes -- see "Adapter-unification fix" and "Failure-liveness,
+startup-honesty, and ownership-scoped deletion fixes" below
 Environment: two independent Multipass Ubuntu 24.04 LTS ARM64 VMs (`daim-lab`,
 `daim-lab-2`) on the same host-only subnet, connected by a real GRE tunnel
 (not a shared bridge or namespace) -- Open vSwitch 3.3.4 (`daim-lab`) /
@@ -52,8 +53,8 @@ call through the local `daim_ovs_flow` CLI unconditionally.
 Two new unit tests confirmed the connection-multiplexing extension is inert
 unless opted into and routes correctly when it is
 (`test_default_config_uses_single_local_ovsdb_target`,
-`test_multi_ovs_target_routing`); two further unit tests, added by the
-adapter-unification fix below, are described there.
+`test_multi_ovs_target_routing`); five further unit tests, added by the
+fixes described below, are covered there.
 
 ## Testbed
 
@@ -152,10 +153,116 @@ itself `posix_spawn`s `ovs-ofctl`, so the adapter-unified remote path now
 spawns two processes per remote flow-mod call instead of one) measurably
 changed repair timing. It does, modestly: mean repair-action time rose
 from 185.75 ms (pre-fix, direct `ovs-ofctl`, raw data retained as
-`..._pre_adapter_unification.*`) to **191.48 ms** (post-fix, through the
+`..._pre_adapter_unification.*`) to 191.48 ms (post-fix, through the
 adapter), a difference of about 5.7 ms attributable to the extra
-process-spawn hop. This is reported as the honest cost of closing the
-architecture-consistency finding, not hidden or averaged away.
+process-spawn hop. This was reported as the honest cost of closing the
+architecture-consistency finding, not hidden or averaged away -- and, per
+the section below, has since shifted again after a further fix that also
+changes the wire-level flow-mod strings.
+
+## Failure-liveness, startup-honesty, and ownership-scoped deletion fixes
+
+A second external review pass over the adapter-unification fix above --
+reading the code again, not just re-reading its own description -- found
+three further real issues, none of them exercised by the clean, all-5/5
+n=5 run reported at the time, so none required new live data to *find*,
+though the first two are direct fixes to the exact failure-handling logic
+the adapter-unification pass added, and the third changes the wire-level
+flow-mod strings sent on every repetition, clean or not, which does
+require the re-run reported in this update.
+
+**1. `execute_repair()`'s own failure-handling was itself unsound.** The
+first fix left `current_path` at its pre-repair value on a partial
+failure. But `withdraw_path(current_path)` runs *before* `install_path()`;
+if withdrawal succeeded and installation then failed, the switches hold
+neither the old path nor the new one, so reporting the old path as still
+current is its own false claim -- exactly the class of defect the fix was
+meant to close, one level deeper. `current_path` now becomes `None`
+("forwarding state not reliably known") on any partial failure.
+`withdraw_path(None)` treats that as nothing to withdraw rather than
+crashing (`path_to_flows(None)` would otherwise raise `TypeError`), and
+`decide_link_event`'s `new_path == current_path` no-op check naturally
+never matches `None`.
+
+**2. That fix, by itself, was still a liveness gap.** `decide_link_event()`
+only starts a repair on a `state=="down"` event for an edge *not already*
+in `down_edges` -- but a failed repair's edge is already in `down_edges` by
+the time `execute_repair()` runs (added when the "down" transition was
+first processed). So a duplicate transition on the same edge, or no
+further transition at all (the physical link stays down and nothing about
+it changes again), would never re-trigger a repair through the
+event-driven path alone: `current_path=None` could become a *permanent*
+dead end, not a temporary one, for a transient failure (a remote instance
+briefly unreachable, a timeout) that later clears with nothing to notice
+it clearing. Fixed with `maybe_retry_repair()`, called from `main()`'s
+periodic `poll_interval` tick (the same wake-up source
+`reconcile_expired_holddowns()` already uses): whenever `current_path` is
+`None`, it recomputes BFS against the current `down_edges` and retries the
+repair, with no new OVSDB event required. There is no bounded retry count
+or backoff -- an explicit, disclosed limitation, not a designed
+circuit-breaker policy.
+
+**3. The startup path had the identical honesty gap `execute_repair()` was
+fixed for, on a different code path.** `main()`'s startup sequence called
+`install_path(current_path)` for its side effect only, discarding whether
+the initial installation actually succeeded, and always logged
+`agent_started` with the intended path regardless. New
+`execute_startup_install()` mirrors `execute_repair()`'s contract exactly:
+`agent_started` and a non-`None` `current_path` only on full success;
+otherwise `startup_install_incomplete` and `current_path=None`, which
+`maybe_retry_repair()` then picks up on the next tick -- unifying "failed
+at startup" and "failed during an ongoing repair" into the same recovery
+path instead of two separate failure modes.
+
+**4. A separate, unrelated finding: flow deletion was scoped far more
+broadly than intended.** `withdraw_path()` built its delete match by
+stripping the `add`-form flow string down to whatever was left
+(`flow.split(",actions=")[0].split(",", 1)[1]`), producing a bare
+`in_port=N` match with no priority, no cookie, nothing else. Checked
+empirically against a live OVS bridge before writing any fix: a real
+unrelated flow (different priority, an extra `dl_type` match, a different
+action) sharing only the same `in_port` was silently deleted by that bare
+match, since OVS's `ovs-ofctl del-flows` without `--strict` deletes *every*
+flow whose fields are a superset of the given match, regardless of
+priority or any other field. Re-adding `priority=` to the match does not
+fix this: non-strict `del-flows` rejects it outright (`ovs-ofctl: unknown
+keyword priority`, also confirmed empirically -- the actual reason an
+earlier revision stripped it in the first place, not a style choice).
+`--strict` deletion would work but is not reachable through the existing
+`daim_ovs_flow add|delete BRIDGE MATCH` CLI, which hardcodes the plain
+`del-flows` subcommand with no way to pass flags -- and extending it would
+mean modifying the DAIM-OS OVS adapter's C source, contradicting this
+artifact's stated "extends, without modifying" boundary (README.md), for
+a change that would also affect every other caller of the same shared,
+vendored adapter copy.
+
+The fix needed neither: OpenFlow cookies. `path_to_flows()` now tags every
+flow this agent installs with a fixed `AGENT_COOKIE` (`0x5e1fea9e`, an
+arbitrary distinguishing value), and `withdraw_path()` deletes by
+`cookie=<AGENT_COOKIE>/-1,in_port=N` instead of a bare `in_port=N` match.
+Confirmed empirically before finalizing: a non-strict `del-flows` call
+with a cookie mask correctly deletes only the agent's own cookie-tagged
+flow and leaves an unrelated same-`in_port` flow (a different or absent
+cookie) completely untouched -- achieved entirely within
+`daim_link_agent.py`, through the same unmodified `daim_ovs_flow`
+`add`/`delete` CLI, no C-code change of any kind.
+
+Three new/updated unit tests
+(`test_delete_match_scopes_by_cookie_not_bare_in_port`,
+`test_execute_startup_install_reports_partial_failure`,
+`test_maybe_retry_repair_retries_until_success`) cover these three fixes.
+19/19 unit tests pass.
+
+Because the cookie-scoping fix changes the actual flow-mod strings sent on
+every install/withdraw call -- unlike the retry and startup-honesty fixes,
+which only change behaviour on a failure path the clean n=5 run never
+exercised -- the live n=5 measurement was re-run again in full, reported
+below; the retry and startup fixes did not require this (neither the 5/5
+clean prior run nor this one ever produced a `repair_incomplete` or
+`startup_install_incomplete` event, so their new code paths were not
+exercised by either measured run and remain verified at the unit-test
+level plus this report's own live cookie-collision check, not by a live
+run that actually failed and recovered).
 
 ## Method
 
@@ -199,20 +306,20 @@ corroboration from the concurrent ping stream.
 
 | Rep | Repaired path | Repair-action time (ms) | Consecutive missing pings | Outage bound (ms) |
 |---:|---|---:|---:|---:|
-| 1 | s1, s3, s5, s4 | 198.55 | 10 | 180–220 |
-| 2 | s1, s3, s5, s4 | 194.30 | 9 | 160–200 |
-| 3 | s1, s3, s5, s4 | 191.58 | 9 | 160–200 |
-| 4 | s1, s3, s5, s4 | 188.30 | 9 | 160–200 |
-| 5 | s1, s3, s5, s4 | 184.69 | 8 | 140–180 |
-| **Mean** | | **191.48** | | |
+| 1 | s1, s3, s5, s4 | 203.61 | 10 | 180–220 |
+| 2 | s1, s3, s5, s4 | 223.07 | 10 | 180–220 |
+| 3 | s1, s3, s5, s4 | 191.61 | 9 | 160–200 |
+| 4 | s1, s3, s5, s4 | 202.86 | 9 | 160–200 |
+| 5 | s1, s3, s5, s4 | 196.57 | 10 | 180–220 |
+| **Mean** | | **203.54** | | |
 
-Raw data: `stage3_multi_ovs_raw.csv` (parsed summary, post-fix),
-`stage3_multi_ovs_agent_rep{1..5}.log` / `stage3_multi_ovs_ping_rep{1..5}.log`
-(post-fix, current numbers above); pre-fix data retained as
-`stage3_multi_ovs_{agent,ping}_rep{1..5}_pre_adapter_unification.log` and
-`stage3_multi_ovs_raw_pre_adapter_unification.csv`, per this evidence set's
-convention of keeping a defect's before/after data side by side rather than
-overwriting it.
+Raw data: `stage3_multi_ovs_raw.csv` (parsed summary, current), plus a
+similarly-named `_raw` per-rep log for each of `stage3_multi_ovs_agent_rep{1..5}.log`
+/ `stage3_multi_ovs_ping_rep{1..5}.log`; two generations of prior data are
+retained rather than overwritten, per this evidence set's convention:
+`..._pre_adapter_unification.*` (before the adapter-unification fix,
+185.75 ms mean) and `..._pre_cookie_scoping.*` (after adapter-unification
+but before the cookie-scoping fix, 191.48 ms mean).
 
 **Independent corroboration from packet-level data, and a corrected bound.**
 The "Consecutive missing pings" column is not read from the agent's own
@@ -233,21 +340,26 @@ succeeded, the only thing that can be inferred is that the outage started
 strictly after the last successful probe and ended strictly before the
 next successful one: the true outage duration `T` satisfies
 `(N-1)Δ < T < (N+1)Δ`, not the tighter (and wrong) bound stated before.
-For `Δ=20 ms` and the gaps observed here (8-10 missing packets), that is a
-range of roughly 140-220 ms depending on the repetition (see the table's
-"Outage bound" column) -- consistent with, but not a tight independent
-confirmation of, the agent-reported repair-action times (184.7-198.5 ms).
-The repair-action time falls inside the bound in four of the five
-repetitions; in repetition 5 it exceeds the bound's nominal upper limit
-(180 ms) by 4.69 ms, under a quarter of one probe interval. This is not a
-discrepancy to explain away: `repair_end_ns` marks completion of every
-control-plane flow-mod call the repair requires, which need not be the
-same instant the data plane resumes forwarding in both directions -- a
-probe reply can plausibly return before the very last (e.g.
-reverse-direction or cleanup) flow-mod commits. The two measurements are
-independently collected and show coarse temporal consistency across all
-five repetitions, but they measure two related, not identical, endpoints,
-and repetition 5's near-miss is reported rather than smoothed over. This is
+For `Δ=20 ms` and the gaps observed here (9-10 missing packets), that is a
+range of 160-220 ms depending on the repetition (see the table's "Outage
+bound" column) -- consistent with, but not a tight independent
+confirmation of, the agent-reported repair-action times (191.6-223.1 ms).
+The repair-action time falls inside the bound in three of the five
+repetitions; in repetitions 2 and 4 it exceeds the bound's nominal upper
+limit by 3.07 ms and 2.86 ms respectively, each under a sixth of one
+probe interval. This is not a discrepancy to explain away: `repair_end_ns`
+marks completion of every control-plane flow-mod call the repair requires,
+which need not be the same instant the data plane resumes forwarding in
+both directions -- a probe reply can plausibly return before the very last
+(e.g. reverse-direction or cleanup) flow-mod commits. The two measurements
+are independently collected and show coarse temporal consistency across
+all five repetitions, but they measure two related, not identical,
+endpoints, and these near-misses are reported rather than smoothed over
+-- a slightly larger fraction of repetitions falls outside the bound in
+this run than the previous one (2/5 vs. 1/5), consistent with the modest
+overall timing increase (mean 191.48 ms to 203.54 ms) the cookie-scoping
+fix's slightly longer flow-mod strings plausibly explain, though this
+experiment does not isolate that specific cost either. This is
 real, independently-collected evidence that the reported repair timing
 corresponds to an actual, measurable interruption in the end-to-end data
 path of a plausible magnitude, not only an internal log timestamp -- but it
@@ -272,12 +384,13 @@ This is a functional demonstration across five repetitions of a specific
 scenario -- a single remote edge, fully owned by a second OVS instance, that
 the agent has no local OVSDB connection to -- confirming consistent,
 repeatable detection-and-repair behaviour with a mean repair-action time
-(191.48 ms) in the same range as the single-host figure reported in Section
+(203.54 ms) in the same range as the single-host figure reported in Section
 7.1 (157.67 ms), not a claim that cross-host repair is as fast as or faster
 than local repair: this experiment does not isolate or control for the GRE
-tunnel/TCP round-trip cost or the adapter's extra process-spawn hop, and
-n=5 is reported as means and per-run values only, per Section 6.5's stated
-replication policy.
+tunnel/TCP round-trip cost, the adapter's extra process-spawn hop, or the
+cookie-scoping fix's slightly longer flow-mod strings, and n=5 is reported
+as means and per-run values only, per Section 6.5's stated replication
+policy.
 
 ## Claim boundary
 
@@ -306,8 +419,18 @@ does not establish:
   both `ptcp:` listeners in this testbed are unauthenticated plaintext TCP,
   acceptable for a controlled testbed but not evaluated as, or claimed to
   be, a production-ready remote-management channel.
-- Recovery from a partial installation failure: `execute_repair()` now
-  reports a partial failure honestly (`repair_incomplete`, `current_path`
-  unchanged) instead of misreporting it as success, but it still does not
-  roll back flows that succeeded before a failure, or retry -- that is
-  Section 5.2's two-phase protocol, not yet implemented.
+- Recovery from a partial installation failure: `execute_repair()` reports
+  a partial failure honestly (`repair_incomplete`, `current_path=None`)
+  instead of misreporting it as success, and `maybe_retry_repair()` now
+  retries a degraded state on a bounded periodic tick until it clears --
+  but neither rolls back flows that succeeded before a failure, so the
+  network can still be left in a mixed old/new state while a retry is
+  pending; that is Section 5.2's two-phase protocol, not yet implemented.
+  Neither the retry logic nor the startup-honesty fix was exercised by an
+  actual live failure in this run (all 5/5 repetitions, both before and
+  after the cookie-scoping fix, succeeded cleanly) -- they are verified at
+  the unit-test level (`test_maybe_retry_repair_retries_until_success`,
+  `test_execute_startup_install_reports_partial_failure`), not by a live
+  run that actually failed and recovered.
+- Remote monitor-connection reconnect/resynchronization: unchanged by this
+  update, still a separate, unaddressed gap (Section 8.3).

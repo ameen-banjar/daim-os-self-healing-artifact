@@ -1,0 +1,33 @@
+{"ts": 1786739236.7984674, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "priority=100,in_port=1,actions=output:2"}
+{"ts": 1786739236.810357, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "priority=100,in_port=2,actions=output:1"}
+{"ts": 1786739236.8202524, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "priority=100,in_port=3,actions=output:1"}
+{"ts": 1786739236.837239, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "priority=100,in_port=1,actions=output:3"}
+{"ts": 1786739236.858755, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "priority=100,in_port=1,actions=output:3"}
+{"ts": 1786739236.89048, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "priority=100,in_port=3,actions=output:1"}
+{"ts": 1786739236.911939, "event": "agent_started", "initial_path": ["s1", "s3", "s4"], "down_edges": []}
+{"ts": 1786739246.2130675, "event": "link_down_detected", "interface": "s4-eth1", "edge": ["s3", "s4"], "ns": 41273932394150}
+{"ts": 1786739246.2131436, "event": "flow_start", "action": "delete", "bridge": "s1", "arg": "in_port=1"}
+{"ts": 1786739246.224787, "event": "flow_start", "action": "delete", "bridge": "s1", "arg": "in_port=2"}
+{"ts": 1786739246.2337902, "event": "flow_start", "action": "delete", "bridge": "s3", "arg": "in_port=3"}
+{"ts": 1786739246.2502434, "event": "flow_start", "action": "delete", "bridge": "s3", "arg": "in_port=1"}
+{"ts": 1786739246.2666152, "event": "flow_start", "action": "delete", "bridge": "s4", "arg": "in_port=1"}
+{"ts": 1786739246.2829094, "event": "flow_start", "action": "delete", "bridge": "s4", "arg": "in_port=3"}
+{"ts": 1786739246.2988536, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "priority=100,in_port=1,actions=output:2"}
+{"ts": 1786739246.3086638, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "priority=100,in_port=2,actions=output:1"}
+{"ts": 1786739246.317723, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "priority=100,in_port=3,actions=output:2"}
+{"ts": 1786739246.331101, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "priority=100,in_port=2,actions=output:3"}
+{"ts": 1786739246.3467746, "event": "flow_start", "action": "add", "bridge": "s5", "arg": "priority=100,in_port=1,actions=output:2"}
+{"ts": 1786739246.361891, "event": "flow_start", "action": "add", "bridge": "s5", "arg": "priority=100,in_port=2,actions=output:1"}
+{"ts": 1786739246.3801508, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "priority=100,in_port=2,actions=output:3"}
+{"ts": 1786739246.394613, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "priority=100,in_port=3,actions=output:2"}
+{"ts": 1786739246.4116824, "event": "repair_installed", "path": ["s1", "s3", "s5", "s4"], "repair_start_ns": 41273932489774, "repair_end_ns": 41274131036168, "held_down_seconds": 2.0}
+{"ts": 1786739246.4117289, "event": "transition_suppressed", "interface": "s3-eth1", "state": "down", "remaining_s": 1.8013172740029404}
+Exception ignored in: <module 'threading' from '/usr/lib/python3.12/threading.py'>
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/threading.py", line 1573, in _shutdown
+2026-08-14T20:27:31Z|00001|fatal_signal|WARN|terminating with signal 15 (Terminated)
+    def _shutdown():
+    
+  File "/home/ubuntu/daim/experiments/network/daim_link_agent.py", line 44, in _terminate_monitor_and_exit
+    sys.exit(0)
+SystemExit: 0

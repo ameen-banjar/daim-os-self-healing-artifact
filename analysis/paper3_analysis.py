@@ -740,12 +740,19 @@ def draw_multi_ovs_deployment(path):
     mean_y = chart_top + chart_h - int(chart_h * mean_repair / max_val)
     draw.line((chart_left, mean_y, chart_left + chart_w, mean_y), fill="#0072B2", width=2)
 
+    inside = sum(1 for r, lo, hi in zip(repair, gap_lo, gap_hi) if lo < r < hi)
+    fit_line = (
+        f"The agent-reported time falls inside this bound in all {len(rows)} repetitions."
+        if inside == len(rows) else
+        f"The agent-reported time falls inside this bound in {inside} of {len(rows)} repetitions;\n"
+        "small near-misses in the rest reflect two related, not identical, endpoints, not an error."
+    )
     draw.text(
         (24, chart_top + chart_h + 60),
         "Outage bounds are derived from the concurrent probe's own icmp_seq numbers, not from the agent's log:\n"
         "for N consecutive lost probes at a fixed 20ms interval, the true outage duration lies strictly between\n"
-        "(N-1)x20ms and (N+1)x20ms. The agent-reported repair-action time falls inside this bound in every\n"
-        "repetition -- an independent, packet-level consistency check, not a precise second measurement.",
+        "(N-1)x20ms and (N+1)x20ms. " + fit_line + "\n"
+        "This is a consistency check against a wide, independently-derived bound, not a precise second measurement.",
         fill="#666666", font=small,
     )
     image.save(path)

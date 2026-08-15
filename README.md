@@ -57,7 +57,7 @@ uses them.
   performs the actual OVSDB/adapter I/O. Hold-down state is keyed by physical
   edge (the frozenset of the two switches a link connects), not by interface
   name, since v0.3.0 (see below).
-- `network/test_daim_link_agent.py` — sixteen pure-logic unit tests, runnable
+- `network/test_daim_link_agent.py` — nineteen pure-logic unit tests, runnable
   with plain `python3` and no Mininet/OVS/OVSDB: (1) BFS path computation
   against hand-verified expected flow sets; (2) the hold-down state machine
   driven through a synthetic seven-transition flapping-link sequence, with
@@ -83,8 +83,15 @@ uses them.
   not a stale prior value) and that a degraded `None` current_path does not
   crash a subsequent repair attempt (v0.9.0/v0.10.0); (16) confirming
   `bfs_path()`/`path_to_flows()` resolve the declared `SOURCE`/`DEST`
-  rather than the hardcoded literal names `"h1"`/`"h2"` (v0.10.0, see
-  below).
+  rather than the hardcoded literal names `"h1"`/`"h2"` (v0.10.0); (17)
+  confirming `withdraw_path()` deletes by an `AGENT_COOKIE` mask plus
+  `in_port`, not a bare `in_port` match that non-strict `del-flows` would
+  otherwise match far too broadly; (18) confirming a partially-failed
+  startup installation is reported as `startup_install_incomplete` with
+  `current_path=None`, not a silent `agent_started`; (19) confirming a
+  degraded `current_path=None` is retried on later ticks until the
+  underlying failure clears, with no new OVSDB event required (v0.11.0,
+  see below).
 - `network/test_stage3_startup_already_down.py` — a regression test for a
   bug in the startup live-network harness itself (v0.6.0, see below), kept
   separate from `test_daim_link_agent.py` since it tests the harness, not
@@ -217,6 +224,54 @@ Two more findings from re-reading the v0.6.0 code and figures together:
   schedule is what actually demonstrates the BFS-call reduction; this live
   figure now says so explicitly instead of implying a reduction the live
   data never measured.
+
+## Repair-retry liveness, startup honesty, and cookie-scoped deletion (v0.11.0)
+
+A third external review pass over v0.10.0 -- re-reading the code again, not just re-reading its own
+description -- found three further real issues.
+
+- **`current_path=None` (v0.10.0's fix) was not a guarantee of retry.** `decide_link_event()` only
+  starts a repair on a `state=="down"` event for an edge *not already* in `down_edges` -- but a
+  failed repair's edge is already in `down_edges` by the time `execute_repair()` runs. A duplicate
+  transition on the same edge, or no further transition at all (the physical link stays down and
+  nothing about it changes again), would never re-trigger a repair through the event-driven path
+  alone: a transient flow-installation failure (a remote instance briefly unreachable, a timeout)
+  could leave `current_path=None` a *permanent* dead end, not a temporary one. Fixed: new
+  `maybe_retry_repair()`, called from `main()`'s periodic `poll_interval` tick (not the OVSDB event
+  branch), recomputes BFS and retries whenever `current_path` is `None`, with no new OVSDB event
+  required. No bounded retry count or backoff -- an explicit, disclosed limitation. New test:
+  `test_maybe_retry_repair_retries_until_success`.
+- **The startup path had the identical false-success gap `execute_repair()` was fixed for, on a
+  different code path.** `main()`'s startup sequence called `install_path(current_path)` for its
+  side effect only, always logging `agent_started` regardless of whether it actually succeeded. New
+  `execute_startup_install()` mirrors `execute_repair()`'s contract exactly, feeding a `None`
+  `current_path` into the same `maybe_retry_repair()` machinery on failure. New test:
+  `test_execute_startup_install_reports_partial_failure`.
+- **Flow deletion matched far more broadly than intended.** `withdraw_path()` derived its delete
+  match by stripping the `add`-form string down to a bare `in_port=N`, with no priority, no cookie,
+  nothing else. Confirmed empirically against a live OVS bridge before writing any fix: a real
+  unrelated flow sharing only the same `in_port` (different priority, an extra match field, a
+  different action) was silently deleted by that bare match, since non-strict `ovs-ofctl del-flows`
+  deletes every flow whose fields are a superset of the given match. `--strict` deletion would work,
+  but is not reachable through the existing `daim_ovs_flow add|delete BRIDGE MATCH` CLI, and
+  extending it would mean modifying the DAIM-OS OVS adapter's C source -- contradicting this
+  artifact's "extends, without modifying" boundary, for a change affecting every caller of the same
+  shared, vendored adapter copy. Fixed with OpenFlow cookies instead, entirely within
+  `daim_link_agent.py`: `path_to_flows()` now tags every flow with a fixed `AGENT_COOKIE`
+  (`0x5e1fea9e`), and `withdraw_path()` deletes by a cookie mask plus `in_port` -- confirmed
+  empirically that this deletes only the agent's own flow and leaves the unrelated flow untouched,
+  no C-code change of any kind. New test: `test_delete_match_scopes_by_cookie_not_bare_in_port`.
+
+Because the cookie-scoping fix changes the actual flow-mod strings sent on every install/withdraw
+call (unlike the retry and startup-honesty fixes, which only change behaviour on a failure path the
+clean n=5 run never exercised), the live multi-OVS n=5 measurement was re-run again in full: still
+5/5 clean (no `repair_incomplete` or `startup_install_incomplete` ever produced), mean repair-action
+time 203.54 ms (up from 191.48 ms pre-cookie-scoping -- previous-generation data retained as
+`..._pre_cookie_scoping.*`). The retry and startup-honesty fixes remain verified at the unit-test
+level only; neither measured live run (before or after cookie-scoping) ever actually failed a
+repair, so their new code paths were not exercised live.
+
+16/16 → 19/19 unit tests pass (three new tests added).
 
 ## Safe degraded state and endpoint genericity, found by a second external review pass (v0.10.0)
 

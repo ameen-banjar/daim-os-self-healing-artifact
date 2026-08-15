@@ -1,25 +1,33 @@
-{"ts": 1786739317.6670222, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "priority=100,in_port=1,actions=output:2"}
-{"ts": 1786739317.6759105, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "priority=100,in_port=2,actions=output:1"}
-{"ts": 1786739317.6847603, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "priority=100,in_port=3,actions=output:1"}
-{"ts": 1786739317.7025037, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "priority=100,in_port=1,actions=output:3"}
-{"ts": 1786739317.7175694, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "priority=100,in_port=1,actions=output:3"}
-{"ts": 1786739317.7334306, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "priority=100,in_port=3,actions=output:1"}
-{"ts": 1786739317.7485619, "event": "agent_started", "initial_path": ["s1", "s3", "s4"], "down_edges": []}
-{"ts": 1786739327.4195008, "event": "link_down_detected", "interface": "s4-eth1", "edge": ["s3", "s4"], "ns": 41355138817237}
-{"ts": 1786739327.4196117, "event": "flow_start", "action": "delete", "bridge": "s1", "arg": "in_port=1"}
-{"ts": 1786739327.4308383, "event": "flow_start", "action": "delete", "bridge": "s1", "arg": "in_port=2"}
-{"ts": 1786739327.4408257, "event": "flow_start", "action": "delete", "bridge": "s3", "arg": "in_port=3"}
-{"ts": 1786739327.4562232, "event": "flow_start", "action": "delete", "bridge": "s3", "arg": "in_port=1"}
-{"ts": 1786739327.4707758, "event": "flow_start", "action": "delete", "bridge": "s4", "arg": "in_port=1"}
-{"ts": 1786739327.4849722, "event": "flow_start", "action": "delete", "bridge": "s4", "arg": "in_port=3"}
-{"ts": 1786739327.498854, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "priority=100,in_port=1,actions=output:2"}
-{"ts": 1786739327.5080502, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "priority=100,in_port=2,actions=output:1"}
-{"ts": 1786739327.5168931, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "priority=100,in_port=3,actions=output:2"}
-{"ts": 1786739327.5312192, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "priority=100,in_port=2,actions=output:3"}
-{"ts": 1786739327.5458016, "event": "flow_start", "action": "add", "bridge": "s5", "arg": "priority=100,in_port=1,actions=output:2"}
-{"ts": 1786739327.5610905, "event": "flow_start", "action": "add", "bridge": "s5", "arg": "priority=100,in_port=2,actions=output:1"}
-{"ts": 1786739327.5760581, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "priority=100,in_port=2,actions=output:3"}
-{"ts": 1786739327.5903018, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "priority=100,in_port=3,actions=output:2"}
-{"ts": 1786739327.604283, "event": "repair_installed", "path": ["s1", "s3", "s5", "s4"], "repair_start_ns": 41355138943319, "repair_end_ns": 41355323636196, "held_down_seconds": 2.0}
-{"ts": 1786739327.6043277, "event": "transition_suppressed", "interface": "s3-eth1", "state": "down", "remaining_s": 1.8151402500006952}
-2026-08-14T20:28:52Z|00001|fatal_signal|WARN|terminating with signal 15 (Terminated)
+{"ts": 1786783615.3654394, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:2"}
+{"ts": 1786783615.375388, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:1"}
+{"ts": 1786783615.3839812, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "cookie=0x5e1fea9e,priority=100,in_port=3,actions=output:1"}
+{"ts": 1786783615.4024103, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:3"}
+{"ts": 1786783615.4209294, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:3"}
+{"ts": 1786783615.4377453, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "cookie=0x5e1fea9e,priority=100,in_port=3,actions=output:1"}
+{"ts": 1786783615.4563794, "event": "agent_started", "initial_path": ["s1", "s3", "s4"], "down_edges": []}
+{"ts": 1786783624.9797783, "event": "link_down_detected", "interface": "s4-eth1", "edge": ["s3", "s4"], "ns": 85652699117493}
+{"ts": 1786783624.979836, "event": "flow_start", "action": "delete", "bridge": "s1", "arg": "cookie=0x5e1fea9e/-1,in_port=1"}
+{"ts": 1786783624.99151, "event": "flow_start", "action": "delete", "bridge": "s1", "arg": "cookie=0x5e1fea9e/-1,in_port=2"}
+{"ts": 1786783625.0009515, "event": "flow_start", "action": "delete", "bridge": "s3", "arg": "cookie=0x5e1fea9e/-1,in_port=3"}
+{"ts": 1786783625.0180495, "event": "flow_start", "action": "delete", "bridge": "s3", "arg": "cookie=0x5e1fea9e/-1,in_port=1"}
+{"ts": 1786783625.0334756, "event": "flow_start", "action": "delete", "bridge": "s4", "arg": "cookie=0x5e1fea9e/-1,in_port=1"}
+{"ts": 1786783625.0514135, "event": "flow_start", "action": "delete", "bridge": "s4", "arg": "cookie=0x5e1fea9e/-1,in_port=3"}
+{"ts": 1786783625.069034, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:2"}
+{"ts": 1786783625.0790281, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:1"}
+{"ts": 1786783625.0879796, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "cookie=0x5e1fea9e,priority=100,in_port=3,actions=output:2"}
+{"ts": 1786783625.1037838, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:3"}
+{"ts": 1786783625.1182523, "event": "flow_start", "action": "add", "bridge": "s5", "arg": "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:2"}
+{"ts": 1786783625.1317868, "event": "flow_start", "action": "add", "bridge": "s5", "arg": "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:1"}
+{"ts": 1786783625.1468897, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:3"}
+{"ts": 1786783625.162212, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "cookie=0x5e1fea9e,priority=100,in_port=3,actions=output:2"}
+{"ts": 1786783625.176396, "event": "repair_installed", "path": ["s1", "s3", "s5", "s4"], "repair_start_ns": 85652699180658, "repair_end_ns": 85652895748413, "held_down_seconds": 2.0}
+{"ts": 1786783625.1764467, "event": "transition_suppressed", "interface": "s3-eth1", "state": "down", "remaining_s": 1.8033210809953744}
+Exception ignored in: <module 'threading' from '/usr/lib/python3.12/threading.py'>
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/threading.py", line 1573, in _shutdown
+2026-08-15T08:47:10Z|00001|fatal_signal|WARN|terminating with signal 15 (Terminated)
+    def _shutdown():
+    
+  File "/home/ubuntu/daim/experiments/network/daim_link_agent.py", line 44, in _terminate_monitor_and_exit
+    sys.exit(0)
+SystemExit: 0

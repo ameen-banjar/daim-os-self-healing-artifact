@@ -169,21 +169,30 @@ def bfs_path(source, dest, down_edges):
     return None
 
 
+# Tags every flow this agent installs, so a withdrawal can be scoped to
+# exactly this agent's own flows (see _delete_match() below) rather than
+# matching broadly on in_port alone, which would also delete an unrelated
+# flow some other DAIM-OS process installed on the same switch/port.
+# Arbitrary distinguishing value; not derived from anything.
+AGENT_COOKIE = 0x5E1FEA9E
+
+
 def path_to_flows(path):
     """Translates a switch path into per-switch flow rules, walking from the
     declared SOURCE host to the declared DEST host -- reads these as module
     globals at call time (like REMOTE_ENDPOINTS elsewhere in this file) so a
     deployment that overrides them via load_topology_config() is honoured;
     an earlier revision hardcoded the literal host names "h1"/"h2" here
-    instead."""
+    instead. Every flow carries AGENT_COOKIE so withdraw_path() can scope
+    its delete calls to this agent's own flows only (see _delete_match())."""
     flows = []
     hops = [SOURCE] + path + [DEST]
     for i in range(1, len(hops) - 1):
         switch, prev_node, next_node = hops[i], hops[i - 1], hops[i + 1]
         in_port = TOPOLOGY[switch][prev_node][0]
         out_port = TOPOLOGY[switch][next_node][0]
-        flows.append((switch, f"priority=100,in_port={in_port},actions=output:{out_port}"))
-        flows.append((switch, f"priority=100,in_port={out_port},actions=output:{in_port}"))
+        flows.append((switch, f"cookie=0x{AGENT_COOKIE:x},priority=100,in_port={in_port},actions=output:{out_port}"))
+        flows.append((switch, f"cookie=0x{AGENT_COOKIE:x},priority=100,in_port={out_port},actions=output:{in_port}"))
     return flows
 
 
@@ -234,6 +243,33 @@ def install_path(path):
     return ok
 
 
+def _delete_match(flow):
+    """Builds the delete match for one previously-installed flow: a cookie
+    mask scoped to this agent's own flows (AGENT_COOKIE), plus the flow's
+    `in_port`. Deliberately NOT derived by stripping the `add`-form string
+    down to whatever is left over -- an earlier revision did exactly that
+    (`flow.split(",actions=")[0].split(",", 1)[1]`), which dropped BOTH the
+    cookie and the priority field, leaving only a bare `in_port=N` match.
+    That match is dangerously broad: OVS's `ovs-ofctl del-flows` without
+    `--strict` deletes every flow whose fields are a superset of the given
+    match, regardless of priority or any other field -- confirmed
+    empirically against a live OVS bridge, a real unrelated flow sharing
+    the same `in_port` (a different priority, an extra `dl_type` match, a
+    different action) was silently deleted by a bare `in_port=N` delete
+    call. `priority=` cannot fix this either: non-strict `del-flows`
+    rejects it outright (`ovs-ofctl: unknown keyword priority`, confirmed
+    empirically -- this is the actual reason an earlier revision stripped
+    it, not merely a style choice). A cookie mask, by contrast, IS accepted
+    by non-strict `del-flows` and correctly scopes the match: confirmed
+    empirically that `cookie=<AGENT_COOKIE>/-1,in_port=N` deletes only this
+    agent's own flow and leaves an unrelated same-`in_port` flow with a
+    different (or absent) cookie completely untouched. No change to the
+    DAIM-OS OVS adapter (`daim_ovs_flow`) was needed for this -- cookie
+    scoping works through the same unmodified `add`/`delete` CLI."""
+    in_port = flow.split("in_port=")[1].split(",")[0]
+    return f"cookie=0x{AGENT_COOKIE:x}/-1,in_port={in_port}"
+
+
 def withdraw_path(path):
     """Returns True only if every flow-delete call for `path` succeeded.
     `path=None` -- the agent's forwarding-state bookkeeping is unknown
@@ -245,10 +281,7 @@ def withdraw_path(path):
         return True
     ok = True
     for bridge, flow in path_to_flows(path):
-        # del-flows match syntax does not accept "priority=..."; strip it,
-        # matching stage3_link_recovery.py's install_alternate() convention.
-        match = flow.split(",actions=")[0].split(",", 1)[1]
-        if not apply_flow("delete", bridge, match):
+        if not apply_flow("delete", bridge, _delete_match(flow)):
             ok = False
     return ok
 
@@ -301,6 +334,78 @@ def execute_repair(decision, current_path):
         "withdraw_ok": withdraw_ok, "install_ok": install_ok,
         "repair_start_ns": repair_start_ns, "repair_end_ns": repair_end_ns,
     }
+
+
+def execute_startup_install(current_path, down_edges):
+    """Installs the initial path computed at agent startup, and reports the
+    outcome without claiming success it did not achieve -- an earlier
+    revision called `install_path(current_path)` for its side effect only,
+    discarding whether the initial flow installation actually succeeded, so
+    `main()` always logged `agent_started` with the intended path even if
+    the underlying flow-mod calls partially failed. This is the same class
+    of defect `execute_repair()` fixes for the ongoing repair path, found on
+    the startup path by a second look at the same review.
+
+    On failure, the returned current_path is `None`, exactly like
+    `execute_repair()`'s failure case -- not a distinct "broken at startup"
+    state -- so the agent does not silently start in a state it believes is
+    healthy, and `maybe_retry_repair()`'s periodic retry (below) picks up
+    the unfinished installation on the next tick, with no special-casing
+    needed for "this failure happened during startup" versus "this failure
+    happened during an ongoing repair". Returns (new_current_path,
+    event_name, event_fields) for the caller to log."""
+    if install_path(current_path):
+        return current_path, "agent_started", {
+            "initial_path": current_path,
+            "down_edges": [list(edge) for edge in down_edges],
+        }
+    return None, "startup_install_incomplete", {
+        "attempted_path": current_path,
+        "down_edges": [list(edge) for edge in down_edges],
+    }
+
+
+def maybe_retry_repair(current_path, down_edges):
+    """If `current_path` is `None` -- the agent's forwarding state was left
+    unknown by a prior partial-failure repair or startup install (see
+    `execute_repair()`/`execute_startup_install()`) -- attempts a fresh
+    repair, recomputing the BFS path against the current `down_edges`
+    rather than reusing whichever attempt failed. Returns
+    (new_current_path, event_name, event_fields) exactly like
+    `execute_repair()`, or `(current_path, None, None)` if no retry was
+    needed (`current_path` is not `None`).
+
+    This closes a real liveness gap found by review: `decide_link_event()`
+    only starts a repair on a `state=="down"` event for an edge `not in
+    down_edges` -- but a failed repair's edge is already in `down_edges` by
+    the time `execute_repair()` runs (added when the "down" transition was
+    first processed), so a *duplicate* transition on the same edge, or no
+    further transition at all (the physical link stays down and nothing
+    about it changes again), would never re-trigger a repair attempt
+    through the event-driven path alone. `current_path=None` becoming a
+    permanent dead end -- rather than "not yet fixed" -- would mean a
+    transient flow-installation failure (a remote OVS instance briefly
+    unreachable, a timeout) could leave the agent silently blind
+    indefinitely, with no further action, even after the underlying
+    problem clears. Called from `main()`'s periodic `poll_interval` tick
+    (the same wake-up source `reconcile_expired_holddowns()` already uses),
+    not from the OVSDB event branch, since this must keep trying with no
+    event required to trigger it. If BFS finds no path at all avoiding
+    `down_edges` (the edge is genuinely unreachable another way, not a
+    flow-installation problem), this reports `repair_retry_no_path` rather
+    than retrying pointlessly every tick. There is no bounded retry count
+    or give-up threshold -- retries continue at the existing tick interval
+    for as long as `current_path` stays `None`, an explicit, disclosed
+    limitation (a permanently unreachable remote OVS instance would retry
+    forever) rather than a designed backoff/circuit-breaker policy."""
+    if current_path is not None:
+        return current_path, None, None
+    retry_path = bfs_path(SOURCE, DEST, down_edges)
+    if retry_path is None:
+        return current_path, "repair_retry_no_path", {
+            "down_edges": [list(edge) for edge in down_edges],
+        }
+    return execute_repair({"action": "repair", "new_path": retry_path}, current_path)
 
 
 def is_held_down(edge, held_down_until, now):
@@ -623,9 +728,8 @@ def main():
             log("fatal", reason="no initial path avoiding edges already down at startup",
                 down_edges=[list(edge) for edge in down_edges])
             sys.exit(1)
-        install_path(current_path)
-        log("agent_started", initial_path=current_path,
-            down_edges=[list(edge) for edge in down_edges])
+        current_path, event_name, event_fields = execute_startup_install(current_path, down_edges)
+        log(event_name, **event_fields)
     except BaseException:
         for proc in procs:
             if proc.poll() is None:
@@ -648,6 +752,9 @@ def main():
             )
             for edge in recovered:
                 log("link_up_detected", edge=list(edge), reconciled_after_holddown=True)
+            current_path, event_name, event_fields = maybe_retry_repair(current_path, down_edges)
+            if event_name is not None:
+                log(event_name, **event_fields)
             continue
 
         name, state = event
