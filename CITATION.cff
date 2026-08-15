@@ -6,10 +6,11 @@ authors:
   - family-names: Banjar
     given-names: Ameen
     orcid: "https://orcid.org/0000-0002-0871-5153"
-version: 0.13.0
+version: 0.14.0
 date-released: 2026-08-15
 license: Apache-2.0
-doi: 10.5281/zenodo.21951662
+# doi: TODO -- fill in the v0.14.0 version-specific DOI once this tag's
+# release is minted by Zenodo. v0.13.0 DOI: 10.5281/zenodo.21951662.
 # v0.12.0 DOI: 10.5281/zenodo.21949036.
 # v0.11.0 DOI: 10.5281/zenodo.21945308.
 # v0.10.0 DOI: 10.5281/zenodo.21940583. v0.9.0 DOI: 10.5281/zenodo.21940478.
@@ -189,9 +190,17 @@ abstract: >-
   partial-failure honesty, endpoint genericity, cookie-scoped deletion,
   startup-install honesty, repair-retry liveness, pair-scoped-cookie
   determinism, monitor-subprocess reconnect, forwarding-consistency
-  rejection, two-phase rollback with boundary-hop-collision handling, and
-  the rollback protocol's own result-honesty/staged-subset/staging-order
-  correctness), all
+  rejection, two-phase rollback with boundary-hop-collision handling, the
+  rollback protocol's own result-honesty/staged-subset/staging-order
+  correctness, and ambiguous-timeout read-back resolution (v0.14.0: a
+  seventh review pass found apply_flow() treated a subprocess timeout as
+  a confirmed failure identically to a non-zero exit, though a timeout
+  only means the client gave up waiting, not that the switch never
+  applied the operation -- fixed by reading the switch's actual state
+  back directly and resolving True/False only once confirmed, raising
+  rather than guessing if even the read-back cannot tell; live-verified
+  only as a regression check on the ordinary path, since no measured
+  repetition has ever actually timed out), all
   runnable without Mininet/OVS; live-network flapping-link,
   startup-already-down, and multi-OVS-deployment scripts and their raw data
   and event logs across every pre-fix and post-fix run, retained side by

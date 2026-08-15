@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pure-logic unit tests for daim_link_agent, independent of Mininet/OVS/OVSDB.
 
-Twenty-seven things are checked without a live network:
+Thirty-one things are checked without a live network:
 1. `test_bfs_path_computation` -- the BFS-computed primary and alternate
    paths produce exactly the flow sets that were previously hand-written in
    stage3_link_recovery.py's install_primary()/install_alternate(), so the
@@ -167,13 +167,43 @@ Twenty-seven things are checked without a live network:
     otherwise `repair_installed`-reported repair with a real blackhole,
     confirmed via `ovs-ofctl dump-flows` showing the colliding match
     completely empty afterward.
-27. `test_rollback_staged_path_restores_boundary_hop_collisions` --
-    `_rollback_staged_path()`, `execute_repair()`'s rollback step on a
+27. `test_rollback_staged_flows_restores_boundary_hop_collisions` --
+    `_rollback_staged_flows()`, `execute_repair()`'s rollback step on a
     staging failure, must RESTORE `old_path`'s original action at a
     boundary-hop match (an add-flow call), not merely delete it -- the
     same live blackhole as item 26, on the rollback side instead of the
     commit side. A purely-additive staged flow with no `old_path`
-    counterpart is still deleted, as ordinary cleanup."""
+    counterpart is still deleted, as ordinary cleanup.
+28. `test_rollback_staged_flows_ignores_never_staged_matches` --
+    `_rollback_staged_flows()` must act only on the flows a failed
+    `install_path()` call actually confirmed staged (its `staged` return
+    value), never on the full intended new path: a flow the
+    forwarding-consistency pre-check rejected before ever calling
+    `apply_flow()` was never touched by this attempt, and rolling it back
+    anyway at a boundary-hop collision match would RE-INSTALL `old_path`'s
+    action there -- silently overwriting the very foreign flow that check
+    had just correctly refused to overwrite, defeating that check through
+    its own supposed safety net.
+29. `test_install_path_stages_boundary_collisions_last` --
+    `install_path(new_path, old_path=...)` must stage every non-colliding,
+    purely-additive flow FIRST, deferring the (at most two) boundary-hop
+    colliding flows -- which immediately repoint a live switch's
+    forwarding action away from `old_path` -- to the very end, so
+    `old_path` stays fully live and correct for as long as possible during
+    staging rather than being repointed onto a still-incomplete new path.
+30. `test_apply_flow_resolves_ambiguous_timeout_via_readback` --
+    `apply_flow()` must not treat a subprocess timeout as a confirmed
+    failure the way a non-zero exit is: a timeout only means the client
+    gave up waiting, not proof the switch never applied the operation. On
+    a timeout, it reads back the switch's actual state directly and
+    returns `True`/`False` only once that read-back confirms the real
+    outcome, raising `_ForwardingCheckError` -- not guessing -- if even
+    the read-back itself cannot determine the answer.
+31. `test_apply_flow_or_fail_safe_treats_unresolved_ambiguity_as_failure` --
+    `_apply_flow_or_fail_safe()`, what every caller of `apply_flow()` in
+    this file actually uses, converts an unresolved ambiguous outcome into
+    a plain `False` rather than letting `_ForwardingCheckError` propagate
+    to callers that only handle a boolean result."""
 import json
 import os
 
@@ -800,6 +830,121 @@ def test_apply_flow_routes_remote_bridge_through_adapter():
     print("daim_link_agent apply_flow adapter-unification regression test: PASS "
           "-- local and remote bridges both go through the daim_ovs_flow adapter binary, "
           "just with a different target argument.")
+
+
+def test_apply_flow_resolves_ambiguous_timeout_via_readback():
+    """apply_flow() must not treat a subprocess timeout as a confirmed
+    failure the way a non-zero exit is -- a timeout only means the client
+    gave up waiting, not proof the switch never received or applied the
+    operation. Found by review: an earlier revision returned False on any
+    `TimeoutExpired`, so `install_path()`'s `staged` list (Section 5.2)
+    could wrongly exclude a flow that the switch actually did apply just
+    slowly, and a subsequent rollback would then never touch it, believing
+    it was "never staged" when it may actually still be sitting there
+    with the new path's action. Fixed: on a timeout, apply_flow() reads
+    back the switch's actual state directly (a real `ovs-ofctl dump-flows`
+    query, outside the daim_ovs_flow adapter, a read not an install) and
+    resolves the ambiguity precisely: True only if the intended add/delete
+    outcome is confirmed to have actually happened, False if confirmed not
+    to have, and `_ForwardingCheckError` propagates -- not a silent guess
+    either way -- if even the read-back itself cannot determine the
+    answer. Distinguishes the two subprocess.run() calls (the
+    daim_ovs_flow adapter binary vs. the direct ovs-ofctl read-back) by
+    argv[0]."""
+    saved_run = daim_link_agent.subprocess.run
+    flow = f"cookie=0x{_C},priority=100,in_port=1,actions=output:2"
+    delete_match = f"cookie=0x{_C}/-1,in_port=1"
+
+    def present_result():
+        class Result:
+            returncode = 0
+            stdout = (
+                "OFPST_FLOW reply (OF1.3) (xid=0x2):\n"
+                f" cookie=0x{_C}, duration=1s, table=0, n_packets=0, "
+                "n_bytes=0, priority=100,in_port=1 actions=output:2\n"
+            )
+            stderr = ""
+        return Result()
+
+    def absent_result():
+        class Result:
+            returncode = 0
+            stdout = "OFPST_FLOW reply (OF1.3) (xid=0x2):\n"
+            stderr = ""
+        return Result()
+
+    def make_timeout_then(readback_result):
+        def run(argv, **kwargs):
+            if argv[0] == str(daim_link_agent.CLI):
+                raise daim_link_agent.subprocess.TimeoutExpired(cmd=argv, timeout=5)
+            return readback_result()
+        return run
+
+    try:
+        # ADD times out, read-back CONFIRMS the flow is actually present:
+        # the add DID take effect, just slowly -- must return True.
+        daim_link_agent.subprocess.run = make_timeout_then(present_result)
+        assert daim_link_agent.apply_flow("add", "s1", flow) is True
+
+        # ADD times out, read-back CONFIRMS the flow is absent: the add
+        # did NOT take effect -- must return False.
+        daim_link_agent.subprocess.run = make_timeout_then(absent_result)
+        assert daim_link_agent.apply_flow("add", "s1", flow) is False
+
+        # ADD times out, and the read-back itself ALSO fails: genuinely
+        # cannot tell -- must raise, not silently guess True or False.
+        def always_timeout(argv, **kwargs):
+            raise daim_link_agent.subprocess.TimeoutExpired(cmd=argv, timeout=5)
+        daim_link_agent.subprocess.run = always_timeout
+        try:
+            daim_link_agent.apply_flow("add", "s1", flow)
+            assert False, "expected _ForwardingCheckError"
+        except daim_link_agent._ForwardingCheckError:
+            pass
+
+        # DELETE times out, read-back CONFIRMS the flow is gone: the
+        # delete DID take effect -- must return True.
+        daim_link_agent.subprocess.run = make_timeout_then(absent_result)
+        assert daim_link_agent.apply_flow("delete", "s1", delete_match) is True
+
+        # DELETE times out, read-back shows the flow is STILL present: the
+        # delete did NOT take effect -- must return False.
+        daim_link_agent.subprocess.run = make_timeout_then(present_result)
+        assert daim_link_agent.apply_flow("delete", "s1", delete_match) is False
+    finally:
+        daim_link_agent.subprocess.run = saved_run
+
+    print("daim_link_agent ambiguous-timeout read-back regression test: PASS "
+          "-- a timed-out add/delete call is resolved via a real read-back "
+          "query instead of being treated as a confirmed failure, returning "
+          "True/False only when the switch's actual state confirms the "
+          "answer, and raising rather than guessing when even the "
+          "read-back cannot tell.")
+
+
+def test_apply_flow_or_fail_safe_treats_unresolved_ambiguity_as_failure():
+    """_apply_flow_or_fail_safe() -- what install_path()/withdraw_path()/
+    _withdraw_stale_path()/_rollback_staged_flows() actually call instead
+    of apply_flow() directly -- must convert an unresolved ambiguous
+    outcome (_ForwardingCheckError, raised when even the read-back could
+    not determine the switch's true state) into a plain `False`, not let
+    the exception propagate to callers that only know how to handle a
+    boolean success/failure result."""
+    saved_run = daim_link_agent.subprocess.run
+    try:
+        def always_timeout(argv, **kwargs):
+            raise daim_link_agent.subprocess.TimeoutExpired(cmd=argv, timeout=5)
+        daim_link_agent.subprocess.run = always_timeout
+        result = daim_link_agent._apply_flow_or_fail_safe(
+            "add", "s1", f"cookie=0x{_C},priority=100,in_port=1,actions=output:2"
+        )
+        assert result is False
+    finally:
+        daim_link_agent.subprocess.run = saved_run
+
+    print("daim_link_agent _apply_flow_or_fail_safe regression test: PASS -- "
+          "an unresolved ambiguous outcome is treated as a plain failure, "
+          "not an uncaught exception.")
 
 
 def test_execute_repair_reports_partial_failure_honestly():
@@ -1902,6 +2047,8 @@ def main():
     test_default_config_uses_single_local_ovsdb_target()
     test_multi_ovs_target_routing()
     test_apply_flow_routes_remote_bridge_through_adapter()
+    test_apply_flow_resolves_ambiguous_timeout_via_readback()
+    test_apply_flow_or_fail_safe_treats_unresolved_ambiguity_as_failure()
     test_execute_repair_reports_partial_failure_honestly()
     test_withdraw_stale_path_skips_boundary_hop_collisions()
     test_rollback_staged_flows_restores_boundary_hop_collisions()

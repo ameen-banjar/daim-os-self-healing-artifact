@@ -57,7 +57,7 @@ uses them.
   performs the actual OVSDB/adapter I/O. Hold-down state is keyed by physical
   edge (the frozenset of the two switches a link connects), not by interface
   name, since v0.3.0 (see below).
-- `network/test_daim_link_agent.py` — twenty-nine pure-logic unit tests, runnable
+- `network/test_daim_link_agent.py` — thirty-one pure-logic unit tests, runnable
   with plain `python3` and no Mininet/OVS/OVSDB: (1) BFS path computation
   against hand-verified expected flow sets; (2) the hold-down state machine
   driven through a synthetic seven-transition flapping-link sequence, with
@@ -113,7 +113,12 @@ uses them.
   overwrite a foreign flow that check just protected; (29) confirming
   `install_path()` stages boundary-hop colliding flows LAST, after every
   purely-additive flow has already succeeded, so `old_path` stays fully
-  live and correct for as long as possible during staging (v0.13.0, see
+  live and correct for as long as possible during staging (v0.13.0);
+  (30) confirming `apply_flow()` resolves a timed-out add/delete by
+  reading the switch's actual state back directly, rather than treating
+  the timeout as a confirmed failure; (31) confirming
+  `_apply_flow_or_fail_safe()` converts an unresolved ambiguous outcome
+  into a plain failure rather than an uncaught exception (v0.14.0, see
   below).
 - `network/test_stage3_startup_already_down.py` — a regression test for a
   bug in the startup live-network harness itself (v0.6.0, see below), kept
@@ -157,6 +162,54 @@ uses them.
   `analysis/paper3_analysis.py` from the real raw data and the real output of
   the hold-down unit test (nothing in these figures is hand-drawn or
   invented; re-run the script to regenerate them from source).
+
+## Ambiguous Flow-Mod outcomes resolved by read-back (v0.14.0)
+
+A seventh external review pass -- reading v0.13.0's own `install_path()`/`apply_flow()` contract
+again, not new functionality -- found one more real gap: `apply_flow()` treated a `subprocess`
+timeout as a confirmed failure, exactly like a non-zero exit. That equivalence is wrong: a non-zero
+exit means the adapter/`ovs-ofctl` itself reported the operation failed, before or without applying
+anything; a timeout means the client gave up waiting, which is not proof the switch never received
+or applied the operation. Left unresolved, this understated what `install_path()`'s `staged` list
+(v0.13.0) actually knows -- a flow whose add call timed out but which the switch had, in fact,
+already applied would be wrongly excluded from `staged`, and a later rollback would then never touch
+it, believing it was never staged, while it might actually still be sitting on the switch carrying
+the new path's action.
+
+Fixed: on a timeout, `apply_flow()` now reads the switch's actual state back directly
+(`_add_confirmed_by_readback()`/`_delete_confirmed_by_readback()`, a real `ovs-ofctl dump-flows`
+query, outside the `daim_ovs_flow` adapter -- a read, not an install, the same reasoning Section
+5.1's pre-install conflict check already uses). It returns `True` only if the read-back confirms the
+intended add/delete outcome was actually reached, `False` only if the read-back confirms it was not,
+and raises `_ForwardingCheckError` -- not a silent guess either way -- if even the read-back itself
+cannot determine the answer. Every caller (`install_path()`, `withdraw_path()`,
+`_withdraw_stale_path()`, `_rollback_staged_flows()`) now goes through a new
+`_apply_flow_or_fail_safe()` wrapper, which converts that unresolved case into a plain failure rather
+than propagating an exception each caller would otherwise need to handle individually. Also
+refactored: `_conflicting_flow_cookie()`'s `dump-flows` query logic is now shared with the new
+read-back functions via `_dump_flows_for_match()`, removing duplicated timeout/error handling.
+
+This closes the gap for the one ambiguous outcome this deployment can actually produce and detect (a
+`subprocess` timeout against a real target); it is not claimed as safety under every conceivable
+ambiguous network condition. Verified with unit tests mocking a real `subprocess.TimeoutExpired`
+followed by a controlled read-back response for both add and delete, in every combination (confirmed
+present, confirmed absent, read-back itself fails); live-verified only as a regression check that the
+ordinary, non-timeout repair path is unaffected by this restructuring, since a real 5-second
+`subprocess` timeout was never reached in any repetition measured for this evidence set -- the
+timeout-handling branch itself is exercised by the unit tests, not by a live timeout ever actually
+occurring.
+
+**A note on this round's manuscript changes, not just the code:** the paper's own reported
+repair-action timings (single-host and multi-OVS) were measured against earlier implementations, not
+against this version's stage-then-commit, forwarding-consistency, cookie-widening, and
+ambiguous-outcome logic, all of which add work inside the same measured code path. The manuscript now
+states this explicitly (Section 6.1, Section 8.3) rather than implying the existing numbers
+characterize the current implementation's performance; a final timing re-measurement is deferred
+until the broader evaluation work (topologies, baselines, statistical replication) is otherwise
+complete, so it is collected once against final code rather than repeated after every fix.
+
+New unit tests: `apply_flow()`'s ambiguous-timeout resolution (add/delete, each in all three
+outcomes); `_apply_flow_or_fail_safe()`'s failure-safe conversion. 31/31 tests pass (2 new).
 
 ## Rollback-protocol correctness, closed by live testing, not by trusting the unit tests (v0.13.0)
 

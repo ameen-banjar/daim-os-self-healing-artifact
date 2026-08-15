@@ -241,52 +241,120 @@ def _openflow_target(bridge):
 
 
 class _ForwardingCheckError(Exception):
-    """Raised by _conflicting_flow_cookie() when the read-before-write
-    dump-flows query itself could not be completed (timeout or non-zero
-    exit), as opposed to completing and finding no conflict. Kept distinct
-    from "no conflict found" so install_path() can fail safe: an unreadable
-    switch state is treated as a possible conflict, not as a green light."""
+    """Raised when a direct, read-only `ovs-ofctl dump-flows` query --
+    Section 5.1's pre-install conflict check (`_conflicting_flow_cookie()`)
+    or the ambiguous-outcome read-back below (`_add_confirmed_by_readback()`/
+    `_delete_confirmed_by_readback()`) -- itself could not be completed
+    (timeout or non-zero exit), as opposed to completing and returning a
+    definite answer. Kept distinct from a definite "no conflict"/"not
+    present" result so every caller can fail safe: an unreadable switch
+    state is treated as unresolved, never as a green light."""
 
 
-def _conflicting_flow_cookie(bridge, flow):
-    """Section 5.1's forwarding-consistency check: a read-before-write query
-    -- direct `ovs-ofctl dump-flows`, not the DAIM-OS OVS adapter, since
-    `daim_ovs_flow` only exposes `add`/`delete` (see daim_ovs_flow.c) and
-    this is a read, not an installation, so it does not touch the adapter's
-    "flows are installed through the adapter" claim (Section 4.1), which is
-    about how flows are installed, not how existing switch state is read
-    for a safety pre-check -- for any flow already occupying the exact
-    `priority=100,in_port=N` match `flow` is about to use on `bridge`.
-    Returns that flow's cookie (as a lowercase hex string with no `0x`
-    prefix) if one is installed there, or None if the match is free.
-    `ovs-ofctl dump-flows <target> priority=100,in_port=N` is rejected
-    outright (`unknown keyword priority`, confirmed empirically -- the same
-    restriction non-strict `del-flows` has, see _delete_match() above), so
-    this filters on `in_port=N` alone and checks `priority=100` in the
-    returned lines instead. Without this check, install_path() would call
-    `apply_flow("add", ...)` unconditionally, and OVS's `add-flow` at an
-    already-occupied exact priority+match is a silent in-place replace, not
-    a coexist or a rejection -- confirmed empirically -- so a second
-    process's flow at that match would be overwritten with no record of
-    what was lost."""
+def _dump_flows_for_match(bridge, in_port):
+    """Runs a real `ovs-ofctl dump-flows <target> in_port=N` query on
+    `bridge`, filtered to `in_port` -- shared by every read-only switch-state
+    check in this file (Section 5.1's pre-install conflict check, and the
+    ambiguous-outcome read-back below), so they all resolve `bridge` to a
+    target and handle a failed query identically. `priority=` cannot be
+    used as a `dump-flows` filter keyword either (rejected outright,
+    `unknown keyword priority`, confirmed empirically -- the same
+    restriction non-strict `del-flows` has, see `_delete_match()` above),
+    so callers filter on `in_port=` alone and check `priority=100` (or
+    whatever else they need) against the returned lines themselves.
+    Returns the raw output lines. Raises `_ForwardingCheckError` if the
+    query itself could not be completed."""
     target = _openflow_target(bridge)
-    in_port = flow.split("in_port=")[1].split(",")[0]
     argv = ["ovs-ofctl", "-O", "OpenFlow13", "dump-flows", target, f"in_port={in_port}"]
     try:
         r = subprocess.run(argv, text=True, capture_output=True, timeout=5)
     except subprocess.TimeoutExpired:
-        log("forwarding_check_timeout", bridge=bridge, flow=flow)
         raise _ForwardingCheckError()
     if r.returncode != 0:
-        log("forwarding_check_error", bridge=bridge, flow=flow, stderr=r.stderr.strip())
         raise _ForwardingCheckError()
-    for line in r.stdout.splitlines():
+    return r.stdout.splitlines()
+
+
+def _conflicting_flow_cookie(bridge, flow):
+    """Section 5.1's forwarding-consistency check: a read-before-write query
+    -- direct `ovs-ofctl dump-flows` (`_dump_flows_for_match()`), not the
+    DAIM-OS OVS adapter, since `daim_ovs_flow` only exposes `add`/`delete`
+    (see daim_ovs_flow.c) and this is a read, not an installation, so it
+    does not touch the adapter's "flows are installed through the adapter"
+    claim (Section 4.1), which is about how flows are installed, not how
+    existing switch state is read for a safety pre-check -- for any flow
+    already occupying the exact `priority=100,in_port=N` match `flow` is
+    about to use on `bridge`. Returns that flow's cookie (as a lowercase
+    hex string with no `0x` prefix) if one is installed there, or None if
+    the match is free. Without this check, install_path() would call
+    `apply_flow("add", ...)` unconditionally, and OVS's `add-flow` at an
+    already-occupied exact priority+match is a silent in-place replace, not
+    a coexist or a rejection -- confirmed empirically -- so a second
+    process's flow at that match would be overwritten with no record of
+    what was lost. Note: this check is detect-and-reject, not a race-free
+    guarantee -- the read (this query) and the write (the caller's
+    subsequent `apply_flow("add", ...)`) are two separate calls, not one
+    atomic operation, so it detects and rejects a conflict present at
+    check time, not every conflict a concurrent writer could ever produce
+    (Section 3's claim boundary explicitly excludes concurrent multi-client
+    coordination on a shared match)."""
+    in_port = flow.split("in_port=")[1].split(",")[0]
+    try:
+        lines = _dump_flows_for_match(bridge, in_port)
+    except _ForwardingCheckError:
+        log("forwarding_check_timeout_or_error", bridge=bridge, flow=flow)
+        raise
+    for line in lines:
         if "priority=100," not in line:
             continue
         match = re.search(r"cookie=0x([0-9a-fA-F]+)", line)
         if match:
             return match.group(1)
     return None
+
+
+def _add_confirmed_by_readback(bridge, flow):
+    """Resolves an AMBIGUOUS `apply_flow("add", ...)` outcome -- a
+    subprocess timeout, where the client gave up waiting but the
+    underlying OVS operation's actual effect on the switch is unknown, not
+    a confirmed failure the way a non-zero exit is (that means the
+    adapter/`ovs-ofctl` itself reported failure before or without applying
+    anything). A direct read-back (`_dump_flows_for_match()`, a read, not
+    an install, for the same reason `_conflicting_flow_cookie()` above
+    is): True if `flow` -- this agent's own cookie, at its
+    `priority=100,in_port=N` match, with exactly its intended action -- is
+    confirmed present on `bridge` right now (the add DID take effect,
+    however slowly); False if that exact match is confirmed absent (the
+    add did NOT take effect). Raises `_ForwardingCheckError` if the
+    read-back query itself could not be completed, so the caller can
+    still distinguish "confirmed" from "cannot tell" rather than guessing
+    either way."""
+    cookie = flow.split("cookie=0x")[1].split(",")[0]
+    in_port = flow.split("in_port=")[1].split(",")[0]
+    actions = flow.split("actions=")[1]
+    lines = _dump_flows_for_match(bridge, in_port)
+    for line in lines:
+        if f"cookie=0x{cookie}," not in line:
+            continue
+        if "priority=100," not in line:
+            continue
+        if line.rstrip().endswith(f"actions={actions}"):
+            return True
+    return False
+
+
+def _delete_confirmed_by_readback(bridge, delete_match):
+    """Resolves an AMBIGUOUS `apply_flow("delete", ...)` outcome (a
+    subprocess timeout, the same ambiguity `_add_confirmed_by_readback()`
+    above resolves for adds): True if no flow at `delete_match`'s cookie
+    and `in_port` remains on `bridge` (the delete DID take effect); False
+    if a flow at that cookie+`in_port` is still present (it did not).
+    Raises `_ForwardingCheckError` if the read-back query itself could not
+    be completed."""
+    cookie = delete_match.split("cookie=0x")[1].split("/")[0]
+    in_port = delete_match.split("in_port=")[1]
+    lines = _dump_flows_for_match(bridge, in_port)
+    return not any(f"cookie=0x{cookie}," in line for line in lines)
 
 
 def apply_flow(action, bridge, arg):
@@ -311,7 +379,27 @@ def apply_flow(action, bridge, arg):
     DAIM-OS OVS adapter" for the remote hops of a multi-OVS deployment; this
     version keeps that claim true for both hop types, and additionally gets
     the adapter's `valid_token()` length/newline validation on the remote
-    target argument, which the direct-`ovs-ofctl` version did not have."""
+    target argument, which the direct-`ovs-ofctl` version did not have.
+
+    A subprocess timeout is resolved, not simply treated as failure: an
+    earlier revision returned False on any `TimeoutExpired`, but a timeout
+    only means the client gave up waiting -- it is not proof the switch
+    never received or applied the operation, unlike a confirmed non-zero
+    exit, which means the adapter/`ovs-ofctl` itself reported failure
+    before or without applying anything. On a timeout, this function reads
+    back the switch's actual state (`_add_confirmed_by_readback()`/
+    `_delete_confirmed_by_readback()`) to resolve the ambiguity: if the
+    read-back confirms the intended state was actually reached, this
+    returns True (however slowly); if it confirms the intended state was
+    NOT reached, this returns False, the same as an ordinary failure. If
+    the read-back itself cannot determine the answer, `_ForwardingCheckError`
+    propagates out of this function rather than this function guessing
+    True or False -- every caller in this file
+    (`install_path()`/`withdraw_path()`/`_withdraw_stale_path()`/
+    `_rollback_staged_flows()`) goes through `_apply_flow_or_fail_safe()`
+    below, which treats that the same way they already treat a failed
+    forwarding-consistency pre-check: fail safe, not proceed as if nothing
+    happened."""
     log("flow_start", action=action, bridge=bridge, arg=arg)
     target = _openflow_target(bridge)
     argv = [str(CLI), action, target, arg]
@@ -319,11 +407,32 @@ def apply_flow(action, bridge, arg):
         r = subprocess.run(argv, text=True, capture_output=True, timeout=5)
     except subprocess.TimeoutExpired:
         log("flow_timeout", action=action, bridge=bridge, arg=arg)
-        return False
+        if action == "add":
+            confirmed = _add_confirmed_by_readback(bridge, arg)
+        else:
+            confirmed = _delete_confirmed_by_readback(bridge, arg)
+        log("flow_timeout_resolved_by_readback", action=action, bridge=bridge, arg=arg, confirmed=confirmed)
+        return confirmed
     if r.returncode != 0:
         log("flow_error", action=action, bridge=bridge, arg=arg, stderr=r.stderr.strip())
         return False
     return True
+
+
+def _apply_flow_or_fail_safe(action, bridge, arg):
+    """apply_flow(), but an ambiguous outcome that even the read-back
+    could not resolve (`_ForwardingCheckError`) is treated as failure
+    rather than propagated as an exception. Every caller of `apply_flow()`
+    in this file already tracks success/failure as a plain boolean and
+    reacts to any kind of failure the same way (mark the whole call as
+    failed, do not add the flow to `staged`/count it as cleaned up), so
+    this collapses "confirmed failed" and "still cannot tell" into the
+    single failure case those callers already handle, rather than making
+    every one of them separately catch a new exception type."""
+    try:
+        return apply_flow(action, bridge, arg)
+    except _ForwardingCheckError:
+        return False
 
 
 def install_path(path, old_path=None):
@@ -392,7 +501,7 @@ def install_path(path, old_path=None):
             log("forwarding_conflict_rejected", bridge=bridge, flow=flow, existing_cookie=existing_cookie)
             ok = False
             continue
-        if apply_flow("add", bridge, flow):
+        if _apply_flow_or_fail_safe("add", bridge, flow):
             staged.append((bridge, flow))
         else:
             ok = False
@@ -443,7 +552,7 @@ def withdraw_path(path):
         return True
     ok = True
     for bridge, flow in path_to_flows(path):
-        if not apply_flow("delete", bridge, _delete_match(flow)):
+        if not _apply_flow_or_fail_safe("delete", bridge, _delete_match(flow)):
             ok = False
     return ok
 
@@ -476,7 +585,7 @@ def _withdraw_stale_path(old_path, new_path):
         match = _delete_match(flow)
         if (bridge, match) in new_matches:
             continue
-        if not apply_flow("delete", bridge, match):
+        if not _apply_flow_or_fail_safe("delete", bridge, match):
             ok = False
     return ok
 
@@ -529,9 +638,9 @@ def _rollback_staged_flows(staged, old_path):
         collision = old_by_match.get((bridge, match))
         if collision is not None:
             restore_bridge, restore_flow = collision
-            if not apply_flow("add", restore_bridge, restore_flow):
+            if not _apply_flow_or_fail_safe("add", restore_bridge, restore_flow):
                 ok = False
-        elif not apply_flow("delete", bridge, match):
+        elif not _apply_flow_or_fail_safe("delete", bridge, match):
             ok = False
     return ok
 
