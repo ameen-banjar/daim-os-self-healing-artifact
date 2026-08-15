@@ -1,0 +1,38 @@
+{
+  "s1_dummy_up_scheduled_t": 3.021228915997199,
+  "s2_dummy_up_scheduled_t": 5.036384795996128,
+  "link_up_detected_events": [
+    {
+      "ts": 1786813970.16982,
+      "t_offset": 5.305006265640259
+    }
+  ],
+  "note": "correctness requires every link_up_detected t_offset to be >= s2_dummy_up_scheduled_t (never between s1's and s2's up injections) -- verify by eye against the full event sequence printed below, which is the authoritative record",
+  "fault_log": [
+    {
+      "scheduled_t": 0.0,
+      "interface": "s1-dummy",
+      "state": "down",
+      "actual_t": 0.004324580993852578
+    },
+    {
+      "scheduled_t": 0.1,
+      "interface": "s2-dummy",
+      "state": "down",
+      "actual_t": 0.15198752599826548
+    },
+    {
+      "scheduled_t": 3.0,
+      "interface": "s1-dummy",
+      "state": "up",
+      "actual_t": 3.021228915997199
+    },
+    {
+      "scheduled_t": 5.0,
+      "interface": "s2-dummy",
+      "state": "up",
+      "actual_t": 5.036384795996128
+    }
+  ],
+  "event_count": 21
+}

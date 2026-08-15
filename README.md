@@ -136,6 +136,18 @@ uses them.
   Linux host with Open vSwitch and Mininet installed; run in a Multipass
   Ubuntu 24.04 ARM64 VM for this revision, matching the original Stage 3
   environment's exact OVS/Mininet versions).
+- `network/stage3_asymmetric_interface.py` — a live-network verification of
+  `_edge_confirmed_up()`'s asymmetric-confirmation invariant (Section 4.7)
+  using two independent Linux `dummy` netdevices (not a veth pair, which is
+  carrier-coupled at both ends) so one interface can genuinely confirm "up"
+  while its edge's other interface is still "down" — a timing
+  `net.configLinkStatus()` alone cannot produce, since it changes both of an
+  edge's interfaces through a single call (v0.16.0, see below).
+- `network/stage3_holddown_sensitivity.py` — a live sweep of three hold-down
+  window lengths (0.5s/2.0s/4.0s) against two flap schedules (the original
+  seven-transition schedule and a new denser fifteen-transition burst),
+  compared against a logic-level prediction computed by driving the real
+  `decide_link_event()` (v0.16.0, see below).
 - `network/vm1_topo.py`, `network/vm2_topo.py` — the two-VM Mininet topology
   halves used for the multi-OVS deployment measurement (v0.8.0, see below):
   VM1 runs `h1`-`s1`, VM2 runs `s3`-`s4`-`h2` (primary) and `s3`-`s5`-`s4`
@@ -167,6 +179,56 @@ uses them.
   `analysis/paper3_analysis.py` from the real raw data and the real output of
   the hold-down unit test (nothing in these figures is hand-drawn or
   invented; re-run the script to regenerate them from source).
+- `results/network/STAGE3_HOLDDOWN_SENSITIVITY_ASYMMETRIC_REPORT.md`,
+  `stage3_asymmetric_interface_result.json`, `..._events.jsonl`,
+  `stage3_holddown_sensitivity_raw.csv`, `..._events.jsonl` — the report and
+  raw data from the two v0.16.0 experiments described below.
+
+## Asymmetric-interface confirmation and hold-down sensitivity, verified live (v0.16.0)
+
+Layer 2 step 2 of the evidence-gathering plan, closing two gaps Section 8.2 explicitly disclosed:
+the edge-confirmation invariant (`_edge_confirmed_up()`, Section 4.7) had only ever been shown at
+the logic level, because `net.configLinkStatus()` changes both of an edge's interfaces through a
+single call and so has never produced the asymmetric timing the fix actually exists to handle; and
+only a single 2.0s hold-down window and one seven-transition flap schedule had ever been measured
+live.
+
+**Asymmetric-interface confirmation (`stage3_asymmetric_interface.py`).** A veth pair's two ends
+are carrier-coupled -- confirmed empirically that bringing one end administratively down also
+drops carrier, and hence OVSDB `link_state`, on the peer end -- so a real veth-backed link cannot
+produce genuine asymmetric timing. Two Linux `dummy` netdevices (confirmed independent) were added
+as extra, otherwise-unused ports on `s1`/`s2`, with `MONITORED_INTERFACES` reconfigured via
+`DAIM_TOPOLOGY_CONFIG` to watch them for the `s1`-`s2` edge instead of the real link, which is left
+completely untouched. Schedule: `s1-dummy` down at t=0.0, `s2-dummy` down at t=0.1 (hold-down
+already open from the resulting repair), `s1-dummy` up at t=3.0, `s2-dummy` up at t=5.0. Result: the
+solo `s1-dummy` up at t=3.0 produced no log line at all -- `_edge_confirmed_up()` correctly returned
+`False` and the edge stayed un-recovered -- with `link_up_detected` firing only once `s2-dummy` also
+confirmed up, a full 2 seconds later. This is the exact scenario the fix exists for, now confirmed
+live rather than only at the unit-test level.
+
+**Hold-down window sensitivity (`stage3_holddown_sensitivity.py`).** Six `(window_length,
+flap_schedule)` combinations, one live repetition each (a sensitivity exploration, not a
+statistically replicated dataset): window lengths 0.5s, 2.0s (the already-measured baseline), and
+4.0s, crossed with the original seven-transition schedule and a new fifteen-transition burst
+schedule at a fixed 0.15s cadence. Each combination's live result was compared against a
+logic-level prediction computed by driving the real `decide_link_event()` with a synthetic clock,
+correctly modelling that a single `net.configLinkStatus()` call triggers two separate
+`decide_link_event()` calls per logical transition (confirmed from the raw event log; an initial
+version of the prediction modelled only one interface per transition and under-predicted suppressed
+counts by roughly half, itself a useful confirmation of the doubled-notification behaviour). The
+already-measured baseline (window=2.0s, schedule=baseline_7) reproduced an exact sequence match
+against the corrected prediction; the other five combinations showed small, directionally-consistent
+discrepancies (suppression count increases with both window length and schedule density in every
+case; never crashed, hung, or misbehaved across an 8x range of window lengths and a >2x range of
+schedule density) attributed to real ~150-300ms flow-mod I/O latency between a repair decision and
+the commit that starts the hold-down window -- a real timing gap the manuscript already documents,
+not a defect, and not chased to an exact match since this round is explicitly a preliminary
+exploration (n=1 per combination), not the final statistical dataset.
+
+Full detail, result tables, and discussion: `results/network/STAGE3_HOLDDOWN_SENSITIVITY_ASYMMETRIC_REPORT.md`.
+
+No new unit tests this round (both items are live-network experiments, not agent-logic changes);
+33/33 existing tests still pass.
 
 ## Service-restoration decomposition instrumentation (v0.15.0)
 
