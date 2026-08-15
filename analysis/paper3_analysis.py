@@ -29,6 +29,7 @@ FLAP_RAW_PRE_FIX = ROOT / "results/network/stage3_holddown_flapping_raw_pre_edge
 STARTUP_RESULT = ROOT / "results/network/stage3_startup_already_down_result.json"
 STARTUP_RESULT_PRE_FIX = ROOT / "results/network/stage3_startup_already_down_result_pre_fix.json"
 MULTI_OVS_RAW = ROOT / "results/network/stage3_multi_ovs_raw.csv"
+TOPOLOGY_SCALE_RAW = ROOT / "results/network/stage3_topology_scale_raw.csv"
 OUT = ROOT / "results/paper3"
 OUT.mkdir(parents=True, exist_ok=True)
 
@@ -758,6 +759,102 @@ def draw_multi_ovs_deployment(path):
     image.save(path)
 
 
+# ------------------------------------------------------------- Figure 9 ----
+
+def draw_topology_scale(path):
+    """Repair-action time and packet loss against repair-path hop count
+    across four structurally different live topologies (Section 7.8) --
+    reads the real per-repetition CSV and aggregates means here, plotting
+    nothing that wasn't actually measured."""
+    with open(TOPOLOGY_SCALE_RAW, newline="") as f:
+        rows = list(csv.DictReader(f))
+
+    order = ["linear_10", "ring_8", "ring_20", "fattree_k4"]
+    labels = {
+        "linear_10": "linear_10\n(10 sw, 9 hops)",
+        "ring_8": "ring_8\n(8 sw, 4 hops)",
+        "ring_20": "ring_20\n(20 sw, 10 hops)",
+        "fattree_k4": "fattree_k4\n(20 sw, 4 hops)",
+    }
+    by_topo = {name: [r for r in rows if r["topology"] == name] for name in order}
+
+    def mean(vals):
+        vals = [v for v in vals if v not in (None, "", "None")]
+        return sum(float(v) for v in vals) / len(vals) if vals else None
+
+    repair_ms = {}
+    loss_pct = {}
+    for name, rs in by_topo.items():
+        ras = mean([r["repair_action_us"] for r in rs])
+        repair_ms[name] = ras / 1000.0 if ras is not None else None
+        loss_pct[name] = mean([r["packet_loss_pct"] for r in rs])
+
+    width, height = 1750, 1260
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+    title_font = ImageFont.load_default(size=44)
+    font = ImageFont.load_default(size=34)
+    small = ImageFont.load_default(size=28)
+    tiny = ImageFont.load_default(size=25)
+
+    draw.text((24, 24), "Multiple topologies and scale", fill="#111111", font=title_font)
+    draw.text(
+        (24, 78),
+        "repair-action time and packet loss vs. repair-path hop count, four topologies, 10 live repetitions",
+        fill="#666666", font=small,
+    )
+
+    chart_top = 180
+    chart_left = 160
+    chart_w = 1500
+    chart_h = 620
+    max_ms = max(v for v in repair_ms.values() if v is not None) * 1.25
+    max_loss = max(v for v in loss_pct.values() if v is not None) * 1.25
+
+    draw.line((chart_left, chart_top, chart_left, chart_top + chart_h), fill="#333333", width=3)
+    draw.line((chart_left, chart_top + chart_h, chart_left + chart_w, chart_top + chart_h), fill="#333333", width=3)
+    draw.text((24, chart_top - 6), "ms", fill="#0072B2", font=tiny)
+    draw.text((chart_left + chart_w + 10, chart_top - 6), "% loss", fill="#D55E00", font=tiny)
+
+    n = len(order)
+    group_w = chart_w / n
+    bar_w = 110
+
+    for i, name in enumerate(order):
+        gx = chart_left + i * group_w + group_w / 2
+        rx0 = gx - bar_w - 10
+        lx0 = gx + 10
+        ms = repair_ms[name]
+        loss = loss_pct[name]
+        if ms is not None:
+            r_h = int(chart_h * ms / max_ms)
+            draw.rectangle((rx0, chart_top + chart_h - r_h, rx0 + bar_w, chart_top + chart_h), fill="#0072B2")
+            draw.text((rx0 - 6, chart_top + chart_h - r_h - 34), f"{ms:.0f}", fill="#0072B2", font=tiny)
+        else:
+            draw.text((rx0 - 6, chart_top + chart_h - 34), "repair_\nfailed", fill="#0072B2", font=tiny)
+        if loss is not None:
+            l_h = int(chart_h * loss / max_loss)
+            draw.rectangle((lx0, chart_top + chart_h - l_h, lx0 + bar_w, chart_top + chart_h), fill="#D55E00")
+            draw.text((lx0 - 6, chart_top + chart_h - l_h - 34), f"{loss:.1f}", fill="#D55E00", font=tiny)
+        draw.text((gx - 90, chart_top + chart_h + 16), labels[name], fill="#333333", font=tiny)
+
+    draw.rectangle((24, chart_top + chart_h + 130, 48, chart_top + chart_h + 154), fill="#0072B2")
+    draw.text((56, chart_top + chart_h + 130), "mean repair-action time (repair_start_ns to repair_end_ns; N/A for linear_10's designed repair_failed)", fill="#222222", font=tiny)
+    draw.rectangle((24, chart_top + chart_h + 166, 48, chart_top + chart_h + 190), fill="#D55E00")
+    draw.text((56, chart_top + chart_h + 166), "mean packet loss over a 60-packet probe", fill="#222222", font=tiny)
+
+    draw.text(
+        (24, chart_top + chart_h + 220),
+        "ring_20's 10-hop repair takes ~2.4x ring_8's 4-hop repair despite the identical topology SHAPE;\n"
+        "fattree_k4 (4 hops, crossing edge/aggregation/core roles, not a flat cycle) matches ring_8's magnitude\n"
+        "despite monitoring 4x as many interfaces (64 vs 16) -- repair cost tracks path length, not topology\n"
+        "size or monitored-interface count. linear_10 (no redundant path for any edge) correctly and safely\n"
+        "reports repair_failed rather than a false-positive success or a crash.",
+        fill="#666666", font=small,
+    )
+    image.save(path)
+
+
 def main():
     draw_architecture(OUT / "paper3_architecture.png")
     draw_sequence(OUT / "paper3_sequence.png")
@@ -767,11 +864,12 @@ def main():
     draw_live_holddown_comparison(OUT / "paper3_holddown_live_comparison.png")
     draw_startup_comparison(OUT / "paper3_startup_comparison.png")
     draw_multi_ovs_deployment(OUT / "paper3_multi_ovs_deployment.png")
+    draw_topology_scale(OUT / "paper3_topology_scale.png")
     print("Wrote:")
     for name in ("paper3_architecture.png", "paper3_sequence.png", "paper3_topology.png",
                  "paper3_recovery_timeline.png", "paper3_holddown_timeline.png",
                  "paper3_holddown_live_comparison.png", "paper3_startup_comparison.png",
-                 "paper3_multi_ovs_deployment.png"):
+                 "paper3_multi_ovs_deployment.png", "paper3_topology_scale.png"):
         print(" ", OUT / name)
 
 

@@ -1,0 +1,36 @@
+{
+  "design_target_claim": "BFS runtime on a 200-node graph is under 0.3 ms (Section 2.5)",
+  "closest_measured_to_200_nodes": {
+    "rows": 14,
+    "cols": 14,
+    "node_count": 196,
+    "edge_count": 363,
+    "path_length_hops": 26,
+    "repetitions": 2000,
+    "mean_ns": 133019.165,
+    "median_ns": 131417.0,
+    "min_ns": 128541,
+    "max_ns": 204917,
+    "stdev_ns": 4524.247416434866,
+    "mean_ms": 0.133019165,
+    "max_ms": 0.204917
+  },
+  "largest_measured": {
+    "rows": 45,
+    "cols": 45,
+    "node_count": 2025,
+    "edge_count": 3959,
+    "path_length_hops": 88,
+    "repetitions": 2000,
+    "mean_ns": 1844826.3335,
+    "median_ns": 1761333.5,
+    "min_ns": 1622042,
+    "max_ns": 62961667,
+    "stdev_ns": 1472719.020666402,
+    "mean_ms": 1.8448263335,
+    "max_ms": 62.961667
+  },
+  "design_target_holds": true,
+  "generator": "rows x cols grid graph, host-to-host worst-case corner-to-corner path",
+  "note": "bfs_path() is the real, unmodified function from daim_link_agent.py -- not a reimplementation -- monkeypatching only its module-level TOPOLOGY/HOST_ATTACHMENT/SOURCE/DEST globals per grid size."
+}
