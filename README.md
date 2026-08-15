@@ -57,7 +57,7 @@ uses them.
   performs the actual OVSDB/adapter I/O. Hold-down state is keyed by physical
   edge (the frozenset of the two switches a link connects), not by interface
   name, since v0.3.0 (see below).
-- `network/test_daim_link_agent.py` — nineteen pure-logic unit tests, runnable
+- `network/test_daim_link_agent.py` — twenty-seven pure-logic unit tests, runnable
   with plain `python3` and no Mininet/OVS/OVSDB: (1) BFS path computation
   against hand-verified expected flow sets; (2) the hold-down state machine
   driven through a synthetic seven-transition flapping-link sequence, with
@@ -91,7 +91,23 @@ uses them.
   `current_path=None`, not a silent `agent_started`; (19) confirming a
   degraded `current_path=None` is retried on later ticks until the
   underlying failure clears, with no new OVSDB event required (v0.11.0,
-  see below).
+  see below); (20) confirming `_agent_cookie()` is deterministic across
+  calls for the same `(SOURCE, DEST)` pair and distinct for a different
+  pair, replacing the single fixed `AGENT_COOKIE` constant items 1-19
+  above still describe; (21) confirming `resync_from_reconnect()`
+  reconciles state from a fresh post-reconnect snapshot without touching
+  hold-down timers; (22) confirming `monitor_link_rows()` attempts one
+  reconnect on a dead monitor stream and yields a distinct failure event
+  rather than crashing or hanging (v0.12.0, see below); (23)-(24) two
+  tests for the forwarding-consistency pre-check
+  (`_conflicting_flow_cookie()`, `install_path()`'s rejection of a
+  foreign-cookie conflict); (25) documenting the boundary-hop flow-match
+  collision between alternate paths that items 26-27 handle; (26)-(27)
+  two tests for the two-phase rollback protocol's commit
+  (`_withdraw_stale_path()`) and rollback (`_rollback_staged_path()`)
+  steps, confirming a boundary-hop collision is skipped (commit) or
+  restored via `add-flow` (rollback) rather than deleted outright
+  (v0.12.0, see below).
 - `network/test_stage3_startup_already_down.py` — a regression test for a
   bug in the startup live-network harness itself (v0.6.0, see below), kept
   separate from `test_daim_link_agent.py` since it tests the harness, not
@@ -134,6 +150,71 @@ uses them.
   `analysis/paper3_analysis.py` from the real raw data and the real output of
   the hold-down unit test (nothing in these figures is hand-drawn or
   invented; re-run the script to regenerate them from source).
+
+## Pair-scoped cookies, reconnect, forwarding consistency, and two-phase rollback (v0.12.0)
+
+A fifth external review pass, closing four of Section 10's remaining evidence-gate items in one
+round:
+
+- **`AGENT_COOKIE` was a single fixed constant, correct only for a single-agent deployment.**
+  Replaced with `_agent_cookie()`, deriving a deterministic cookie from the declared `(SOURCE,
+  DEST)` pair (a truncated SHA-256 digest, read live like every other topology-derived global in
+  this file). Deterministic across restarts, so a restarted agent still recognises and can withdraw
+  flows a prior instance of itself installed; distinct per pair, so two agents protecting different
+  pairs on a shared switch no longer delete each other's flows. `_delete_match()` now parses the
+  cookie out of the flow string actually installed, rather than recomputing it, so it deletes
+  exactly what was installed even if `SOURCE`/`DEST` were reconfigured in between. New unit test:
+  `_agent_cookie()` is stable per pair and distinct across pairs.
+- **The `repair-action time` metric definition (manuscript Section 6.3) was wrong.** It said the
+  timer started "from the start of BFS recomputation"; the timer actually starts inside
+  `execute_repair()`, after `decide_link_event()`'s own BFS call has already run. A wording
+  correction only -- no numbers changed, and the omission is immaterial at the measured scale (BFS
+  costs under 0.3 ms on a 200-node graph, Section 2.5).
+- **Monitor-subprocess reconnect/resynchronization.** `monitor_link_rows()` now attempts one
+  immediate reconnect (respawn plus a fresh initial snapshot, reusing the same machinery the
+  startup path already uses) when an `ovsdb-client monitor` child's stream dies, reconciling state
+  via `resync_from_reconnect()` without touching hold-down timers, and triggering a real repair
+  through `execute_repair()` if the resync reveals the installed path no longer avoids every down
+  edge. Verified live: the real remote monitor connection was killed on the multi-OVS testbed, the
+  agent logged `monitor_reconnected` for the correct target within one poll tick, and a subsequent
+  real fault injection on the same edge was still correctly detected and repaired. Reconnect is
+  attempted once per disconnection, not retried indefinitely -- a disclosed limitation, not a
+  designed backoff policy.
+- **Forwarding-consistency check (manuscript Section 5.1).** `install_path()` now queries each
+  target switch directly (`ovs-ofctl dump-flows`, a read-only call outside the `daim_ovs_flow`
+  adapter, since reading existing state for a safety pre-check is not an installation operation)
+  before every add, and refuses -- reporting `forwarding_conflict_rejected` and failing the whole
+  call -- an add whose exact match is already occupied by a flow bearing a different process's
+  cookie. Verified live: a foreign-cookie flow was installed directly at the exact match a
+  two-switch repair path's own install would use; `install_path()` correctly rejected only that
+  flow, installed the path's other non-conflicting flows, and `dump-flows` afterward confirmed the
+  foreign flow was left untouched.
+- **Two-phase rollback protocol (manuscript Section 5.2), and a real bug found only by testing it
+  live.** `execute_repair()` now stages (installs) the new path FIRST, and only withdraws the old
+  path once every new-path install call has succeeded; a staging failure rolls back whatever got
+  staged and retains the old path, untouched, rather than degrading to `current_path=None`.
+  Implementing this the naive way -- deleting by OpenFlow match at commit and rollback -- turned out
+  to be unsafe: the switch attached to `SOURCE` and the switch attached to `DEST` each have one flow
+  whose match is identical across every alternate path (the host-attachment port never changes), so
+  `add-flow` at that match during staging silently overwrites the old path's live entry in place,
+  and a naive match-based delete during commit or rollback removes that entry outright instead of
+  leaving or restoring it. Confirmed live: a real link failure and repair, logged as a clean
+  `repair_installed`, left both boundary switches with no matching flow entry at all in one
+  direction -- a real blackhole `ovs-ofctl dump-flows` exposed, that a purely bookkeeping-level test
+  could not have caught. `_withdraw_stale_path()` (commit: skip a match the new path already
+  occupies) and `_rollback_staged_path()` (rollback: restore the old path's action via `add-flow` at
+  a colliding match, delete only the purely-additive rest) replace the naive versions, re-verified
+  against the same live fault injection that found the bug. Tied to this same change: the hold-down
+  window's start moved out of `decide_link_event()` (which used to start it at decision time, before
+  any of the withdrawal/install I/O ran) into `main()`, gated on `execute_repair()` reporting an
+  actual commit -- re-verified live by observing the physical link's other interface, reporting the
+  identical fault moments later, correctly suppressed.
+
+New unit tests: pair-scoped-cookie determinism; `resync_from_reconnect()` state reconciliation;
+`monitor_link_rows()` reconnect-on-stream-death (using real OS pipes); `_conflicting_flow_cookie()`
+dump-flows parsing; `install_path()`'s conflict rejection; the boundary-hop match-collision
+documentation; and `_withdraw_stale_path()`/`_rollback_staged_path()` in isolation -- eight new
+tests, bringing the total to twenty-seven in `test_daim_link_agent.py`.
 
 ## A real defect found by live-network testing (v0.3.0)
 

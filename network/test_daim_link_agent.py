@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pure-logic unit tests for daim_link_agent, independent of Mininet/OVS/OVSDB.
 
-Nineteen things are checked without a live network:
+Twenty-seven things are checked without a live network:
 1. `test_bfs_path_computation` -- the BFS-computed primary and alternate
    paths produce exactly the flow sets that were previously hand-written in
    stage3_link_recovery.py's install_primary()/install_alternate(), so the
@@ -62,13 +62,17 @@ Nineteen things are checked without a live network:
     argument position a local bridge name would occupy, rather than
     bypassing the adapter for the remote case (Section 4.4/4.6).
 15. `test_execute_repair_reports_partial_failure_honestly` -- `execute_repair()`
-    (the I/O half of a "repair" decision) only uses the `repair_installed`
-    event name and only advances the caller's `current_path` if every
-    flow-mod call across withdraw and install actually succeeded; a
-    partial failure is reported as `repair_incomplete` with `current_path`
-    set to `None` (forwarding state no longer reliably known), not the
-    stale prior path, and a degraded `None` current_path does not crash a
-    subsequent repair attempt.
+    (the I/O half of a "repair" decision) implements the two-phase
+    prepare/commit protocol of Section 5.2: the new path is staged
+    (installed) first, and the old path is only withdrawn once every
+    new-path install call succeeds. A staging failure rolls back whatever
+    of the new path got staged and retains the OLD path unchanged (not
+    `None`), reported as `repair_incomplete`; a commit-step failure (old
+    path withdrawal fails after successful staging) still advances
+    `current_path` to the new path -- forwarding is correct -- but under
+    the distinct `repair_installed_stale_withdraw` event; and a `None`
+    prior path (no old path to preserve) does not crash a subsequent
+    repair attempt.
 16. `test_bfs_and_flows_use_declared_source_dest_not_hardcoded_host_names` --
     `bfs_path()`/`path_to_flows()` resolve source/destination hosts from the
     declared `SOURCE`/`DEST`/`HOST_ATTACHMENT` globals rather than the
@@ -78,7 +82,7 @@ Nineteen things are checked without a live network:
     names via `load_topology_config()` would have hit a `KeyError` in
     `path_to_flows()`.
 17. `test_delete_match_scopes_by_cookie_not_bare_in_port` -- `withdraw_path()`
-    deletes flows by an `AGENT_COOKIE` mask plus `in_port`, not a bare
+    deletes flows by a cookie mask plus `in_port`, not a bare
     `in_port` match, which non-strict `del-flows` would otherwise delete
     for ANY flow sharing that port regardless of owner -- confirmed
     empirically against a live OVS bridge with a real unrelated flow.
@@ -88,14 +92,88 @@ Nineteen things are checked without a live network:
     the `agent_started` event name if the initial flow installation fully
     succeeded; a partial failure is reported as `startup_install_incomplete`
     with `current_path=None`, not a silent `agent_started`.
-19. `test_maybe_retry_repair_retries_until_success` -- a degraded
-    `current_path=None` is not a permanent dead end: `maybe_retry_repair()`,
-    called from `main()`'s periodic tick (not the OVSDB event branch),
-    retries a failed repair on later ticks until the underlying
-    flow-installation failure clears, with no new OVSDB event required to
-    trigger it -- closing a real liveness gap, since `decide_link_event()`
-    alone would never re-trigger a repair for an edge already in
-    `down_edges`."""
+19. `test_maybe_retry_repair_retries_until_success` -- a `current_path`
+    left retained-but-faulty by a staged-then-rolled-back repair (Section
+    5.2) is not a permanent dead end: `maybe_retry_repair()`, called from
+    `main()`'s periodic tick (not the OVSDB event branch), retries a
+    failed repair on later ticks -- using `_path_uses_down_edge()` to
+    detect that the retained path still traverses a down edge, since
+    `current_path is None` is no longer the only "retry needed" signal --
+    until the underlying flow-installation failure clears, with no new
+    OVSDB event required to trigger it -- closing a real liveness gap,
+    since `decide_link_event()` alone would never re-trigger a repair for
+    an edge already in `down_edges`.
+20. `test_agent_cookie_is_deterministic_and_pair_scoped` -- `_agent_cookie()`
+    returns the same value across repeated calls for the same `(SOURCE,
+    DEST)` pair (deterministic across a restart, so a restarted agent still
+    recognises flows a prior instance of itself installed) and a different
+    value for a different pair (so two agents protecting different pairs on
+    a shared switch do not delete each other's flows) -- not a single fixed
+    constant an earlier revision used, correct only for a single-agent
+    deployment.
+21. `test_resync_from_reconnect_updates_state_without_touching_holddown` --
+    `resync_from_reconnect()` (Section 4.4's runtime counterpart to the
+    startup-state-sync fix) updates `interface_state`/`down_edges` from a
+    fresh post-reconnect snapshot, skips and reports an unrecognised
+    `link_state` rather than applying or raising on it, and leaves
+    `held_down_until` untouched -- reconnect is about regaining
+    observability, not about repair timing.
+22. `test_monitor_link_rows_reconnects_on_stream_death` -- when an
+    `ovsdb-client monitor` child's stream closes (a crash, a dropped OVSDB
+    connection), `monitor_link_rows()` attempts one immediate reconnect
+    (respawn plus a fresh initial snapshot) instead of silently dropping
+    that target from the poll set forever, resuming event delivery on
+    success and yielding a distinct failure event, not crashing or
+    hanging, when the reconnect attempt itself fails -- closing the
+    monitor-subprocess reconnect gap (Section 10) using real OS pipes to
+    exercise the actual `select()`/`readline()` code path, with
+    `_start_monitor()` monkeypatched rather than spawning a real
+    subprocess.
+23. `test_conflicting_flow_cookie_parses_dump_flows_output` --
+    `_conflicting_flow_cookie()` (Section 5.1's forwarding-consistency
+    read-before-write query) returns the cookie of an existing flow at the
+    exact `priority=100` match this agent is about to install over, `None`
+    when that match is free or occupied only at a different priority
+    (`ovs-ofctl dump-flows` rejects a literal `priority=` filter keyword
+    outright, confirmed empirically, so the query filters on `in_port=`
+    alone and the priority check happens against the returned lines), and
+    raises `_ForwardingCheckError` -- not silently `None` -- when the query
+    itself could not be completed.
+24. `test_install_path_rejects_forwarding_conflict` -- `install_path()`
+    refuses to call `apply_flow("add", ...)` for a flow whose exact match
+    is already occupied by a different process's flow (a foreign cookie),
+    logging `forwarding_conflict_rejected` and failing the whole call,
+    while flows with no conflict on other switches still install;
+    re-installing over this agent's own prior flow (same cookie) is not
+    treated as a conflict; and a pre-check that could not be completed at
+    all blocks the add fail-safe, the same as a real conflict.
+25. `test_boundary_hop_flow_match_collides_across_alternate_paths` --
+    documents the root cause behind items 26-27 below: the SOURCE-facing
+    switch's and DEST-facing switch's flow match toward the host is
+    identical across every alternate path through that switch (the
+    host-attachment port never changes), so `install_path()` "staging"
+    those two specific flow entries is an immediate, live OVS replace, not
+    a non-disruptive side-by-side install the way an interior hop's
+    staging is -- confirmed by comparing `_delete_match()` output across
+    two alternate paths, not by a fresh live OVS call (Section 4.6's
+    existing live verification already confirms `add-flow` at an
+    identical match replaces the action in place).
+26. `test_withdraw_stale_path_skips_boundary_hop_collisions` --
+    `_withdraw_stale_path()`, `execute_repair()`'s commit step, must never
+    delete a match `new_path`'s own staged flows also occupy -- found via a
+    real live fault injection against the multi-OVS testbed: a naive
+    `withdraw_path(old_path)` at commit time deleted the just-staged,
+    live, wanted entry at both boundary switches (item 25), leaving an
+    otherwise `repair_installed`-reported repair with a real blackhole,
+    confirmed via `ovs-ofctl dump-flows` showing the colliding match
+    completely empty afterward.
+27. `test_rollback_staged_path_restores_boundary_hop_collisions` --
+    `_rollback_staged_path()`, `execute_repair()`'s rollback step on a
+    staging failure, must RESTORE `old_path`'s original action at a
+    boundary-hop match (an add-flow call), not merely delete it -- the
+    same live blackhole as item 26, on the rollback side instead of the
+    commit side. A purely-additive staged flow with no `old_path`
+    counterpart is still deleted, as ordinary cleanup."""
 import json
 import os
 
@@ -111,7 +189,9 @@ from daim_link_agent import (
     path_to_flows,
     read_initial_snapshot,
     reconcile_expired_holddowns,
+    resync_from_reconnect,
     withdraw_path,
+    _agent_cookie,
     _delete_match,
     _monitored_ovsdb_targets,
     _ovsdb_target_for_interface,
@@ -121,22 +201,28 @@ from daim_link_agent import (
     DEST,
 )
 
+# The cookie is now derived from (SOURCE, DEST) rather than a fixed constant
+# (Section 4.6) -- computed once here, at the default h1/h2 pair, rather than
+# hardcoded, so these expected sets track _agent_cookie()'s actual behaviour
+# instead of a value that would silently go stale if the derivation changes.
+_C = f"{_agent_cookie():x}"
+
 EXPECTED_PRIMARY = {
-    ("s1", "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:2"),
-    ("s1", "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:1"),
-    ("s2", "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:2"),
-    ("s2", "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:1"),
-    ("s4", "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:3"),
-    ("s4", "cookie=0x5e1fea9e,priority=100,in_port=3,actions=output:1"),
+    ("s1", f"cookie=0x{_C},priority=100,in_port=1,actions=output:2"),
+    ("s1", f"cookie=0x{_C},priority=100,in_port=2,actions=output:1"),
+    ("s2", f"cookie=0x{_C},priority=100,in_port=1,actions=output:2"),
+    ("s2", f"cookie=0x{_C},priority=100,in_port=2,actions=output:1"),
+    ("s4", f"cookie=0x{_C},priority=100,in_port=1,actions=output:3"),
+    ("s4", f"cookie=0x{_C},priority=100,in_port=3,actions=output:1"),
 }
 
 EXPECTED_ALTERNATE = {
-    ("s1", "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:3"),
-    ("s1", "cookie=0x5e1fea9e,priority=100,in_port=3,actions=output:1"),
-    ("s3", "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:2"),
-    ("s3", "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:1"),
-    ("s4", "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:3"),
-    ("s4", "cookie=0x5e1fea9e,priority=100,in_port=3,actions=output:2"),
+    ("s1", f"cookie=0x{_C},priority=100,in_port=1,actions=output:3"),
+    ("s1", f"cookie=0x{_C},priority=100,in_port=3,actions=output:1"),
+    ("s3", f"cookie=0x{_C},priority=100,in_port=1,actions=output:2"),
+    ("s3", f"cookie=0x{_C},priority=100,in_port=2,actions=output:1"),
+    ("s4", f"cookie=0x{_C},priority=100,in_port=2,actions=output:3"),
+    ("s4", f"cookie=0x{_C},priority=100,in_port=3,actions=output:2"),
 }
 
 
@@ -184,11 +270,17 @@ def run_flap_sequence(hold_down_seconds, interface=INTERFACE):
     for now, state in FLAP_EVENTS:
         decision = decide_link_event(
             interface, state, down_edges, held_down_until,
-            interface_state, current_path, now, hold_down_seconds=hold_down_seconds,
+            interface_state, current_path, now,
         )
         actions.append(decision["action"])
         if decision["action"] == "repair":
+            # decide_link_event() no longer starts the hold-down window
+            # itself (Section 5.2/4.7's timing-precision fix) -- main()
+            # does, only once execute_repair() confirms the new path was
+            # actually committed. This simulates that commit inline, since
+            # this test drives the pure decision logic without I/O.
             current_path = decision["new_path"]
+            held_down_until[frozenset(decision["edge"])] = now + hold_down_seconds
     return actions
 
 
@@ -255,13 +347,15 @@ def test_holddown_stale_state_is_reconciled():
     held_down_until, interface_state = {}, {}
     current_path = ["s1", "s2", "s4"]
 
-    # t=0.0: down -> repair, hold-down window opens until t=2.0.
+    # t=0.0: down -> repair; the caller (main(), simulated here) starts the
+    # hold-down window only once the repair commits, open until t=2.0.
     d1 = decide_link_event(
         INTERFACE, "down", down_edges, held_down_until,
         interface_state, current_path, 0.0,
     )
     assert d1["action"] == "repair", d1
     current_path = d1["new_path"]
+    held_down_until[EDGE] = 0.0 + daim_link_agent.HOLD_DOWN_SECONDS
     assert down_edges == {EDGE}, down_edges
 
     # t=0.1: up, suppressed -- this is the transition that used to be lost.
@@ -311,13 +405,16 @@ def test_holddown_covers_both_interfaces_on_same_edge():
     held_down_until, interface_state = {}, {}
     current_path = ["s1", "s2", "s4"]
 
-    # s2-eth1 reports down first (as it did in the live run) -> repair.
+    # s2-eth1 reports down first (as it did in the live run) -> repair; the
+    # caller (main(), simulated here) starts the hold-down window once the
+    # repair commits.
     d1 = decide_link_event(
         "s2-eth1", "down", down_edges, held_down_until,
         interface_state, current_path, 0.0,
     )
     assert d1["action"] == "repair", d1
     current_path = d1["new_path"]
+    held_down_until[EDGE] = 0.0 + daim_link_agent.HOLD_DOWN_SECONDS
 
     # s1-eth2 -- the *other* interface for the same physical link -- then
     # also reports down. Pre-fix, this interface had no hold-down entry of
@@ -375,6 +472,7 @@ def test_edge_recovery_requires_all_interfaces_confirmed_up():
     )
     assert d1["action"] == "repair", d1
     current_path = d1["new_path"]
+    held_down_until[EDGE] = 0.0 + daim_link_agent.HOLD_DOWN_SECONDS
 
     d2 = decide_link_event(
         "s1-eth2", "down", down_edges, held_down_until,
@@ -422,6 +520,7 @@ def test_edge_recovers_once_both_interfaces_confirm_up():
     )
     assert d1["action"] == "repair", d1
     current_path = d1["new_path"]
+    held_down_until[EDGE] = 0.0 + daim_link_agent.HOLD_DOWN_SECONDS
 
     decide_link_event("s1-eth2", "down", down_edges, held_down_until,
                        interface_state, current_path, 0.05)
@@ -704,43 +803,64 @@ def test_apply_flow_routes_remote_bridge_through_adapter():
 
 
 def test_execute_repair_reports_partial_failure_honestly():
-    """execute_repair() must not use the `repair_installed` event name, and
-    must not advance `current_path` to the attempted new path, unless every
-    flow-mod call across both withdraw and install actually succeeded. An
-    earlier revision (inline in main()'s loop) called
-    install_path()/withdraw_path() for their side effects only, discarding
-    apply_flow()'s per-call success/failure, and unconditionally logged
-    `repair_installed` and advanced `current_path` regardless -- so a
-    partial installation failure (a remote OVS instance unreachable, a
-    timeout) was silently reported as a clean repair.
+    """execute_repair() implements the two-phase prepare/commit protocol
+    Section 5.2 specifies: the new path is staged (installed) FIRST, and
+    the old path is only withdrawn -- committed -- once every new-path
+    install call has actually succeeded. An earlier revision withdrew the
+    old path unconditionally BEFORE attempting the new install, so a
+    partial installation failure left the switches holding neither path,
+    and `current_path` could only honestly become `None`.
 
-    On failure, `current_path` must become `None`, not the prior value
-    unchanged -- an earlier revision of this fix returned the prior
-    (pre-repair) path on failure, but `withdraw_path(current_path)` already
-    ran before `install_path()`, so a withdraw-succeeded/install-failed
-    outcome means the switches hold neither the old path nor the new one:
-    claiming the old path is still current is its own false claim, one a
-    later repair's `withdraw_path(current_path)` would act on incorrectly."""
+    On a staging failure, `current_path` must be the OLD path, retained
+    unchanged, not `None` -- staging never touches the old path, so unlike
+    the old withdraw-first order, a failed install is confirmed NOT to
+    have disturbed it, and whatever new-path flows DID get staged before
+    the failure must be rolled back (withdrawn) rather than left as
+    partial garbage on the switches. If staging succeeds but the commit
+    step (withdrawing the old path) then fails, forwarding is still
+    correct -- traffic follows the fully-staged new path -- so
+    `current_path` advances to the new path, but under the distinct
+    `repair_installed_stale_withdraw` event, not a clean `repair_installed`,
+    since the old path's flows are left behind uncleaned."""
     saved_apply_flow = daim_link_agent.apply_flow
+    saved_check = daim_link_agent._conflicting_flow_cookie
     old_path = ["s1", "s2", "s4"]
     new_path = ["s1", "s3", "s4"]
     decision = {"action": "repair", "new_path": new_path}
     try:
+        # This test is about apply_flow()'s own success/failure, not the
+        # forwarding-consistency pre-check (Section 5.1, covered separately
+        # by test_install_path_rejects_forwarding_conflict) -- stub it out
+        # so install_path() never shells out to a real ovs-ofctl.
+        daim_link_agent._conflicting_flow_cookie = lambda bridge, flow: None
+
+        # Clean success: every add and delete call succeeds.
         daim_link_agent.apply_flow = lambda action, bridge, arg: True
         result_path, event_name, fields = execute_repair(decision, old_path)
         assert result_path == new_path
         assert event_name == "repair_installed"
         assert fields["path"] == new_path
 
-        def failing_apply_flow(action, bridge, arg):
+        # Staging (install) fails partway through: s3's add calls fail.
+        # Two-phase order means install_path(new_path) runs BEFORE the old
+        # path is touched at all, so the old path must come back exactly
+        # as it was -- including at the boundary-hop matches s1 and s4
+        # share with new_path, which _rollback_staged_path() must RESTORE
+        # (re-install old_path's own action), not merely delete (see
+        # test_rollback_staged_path_restores_boundary_hop_collisions below
+        # for that mechanism in isolation; a real live blackhole at exactly
+        # these two matches was found and fixed this round).
+        install_calls = []
+
+        def failing_install(action, bridge, arg):
+            install_calls.append((action, bridge, arg))
             return not (action == "add" and bridge == "s3")
 
-        daim_link_agent.apply_flow = failing_apply_flow
+        daim_link_agent.apply_flow = failing_install
         result_path, event_name, fields = execute_repair(decision, old_path)
-        assert result_path is None, (
-            "current_path must become None, not the stale prior path, when an "
-            "install call failed -- withdraw_path(current_path) already ran, "
-            "so the prior path is no longer known to be installed either"
+        assert result_path == old_path, (
+            "a staging failure must retain the OLD path, since staging never "
+            f"touches it -- got {result_path!r}"
         )
         assert event_name == "repair_incomplete", (
             "a partially-failed installation must be reported under a distinct "
@@ -749,9 +869,33 @@ def test_execute_repair_reports_partial_failure_honestly():
         assert fields["install_ok"] is False
         assert fields["attempted_path"] == new_path
         assert fields["prior_path"] == old_path
+        # s2 is exclusive to old_path -- new_path never touches it -- so a
+        # rollback call naming bridge "s2" would only happen if a separate,
+        # unwanted withdraw_path(old_path)-style call had been issued.
+        assert all(bridge != "s2" for action, bridge, arg in install_calls), (
+            f"rollback must never touch old_path's own exclusive flows: {install_calls}"
+        )
 
-        # A degraded current_path=None must not crash a subsequent repair
-        # attempt: withdraw_path(None) has nothing known to withdraw.
+        # Staging succeeds, but the commit step (withdrawing the old path)
+        # then fails: forwarding is correct (new path fully installed), so
+        # current_path must still advance, but under a distinct event name
+        # that flags the old path's flows as stale, uncleaned leftovers.
+        def failing_withdraw(action, bridge, arg):
+            return action != "delete"
+
+        daim_link_agent.apply_flow = failing_withdraw
+        result_path, event_name, fields = execute_repair(decision, old_path)
+        assert result_path == new_path, (
+            "a commit-step failure must still advance current_path to the "
+            "new path -- it IS fully staged and is what traffic follows now"
+        )
+        assert event_name == "repair_installed_stale_withdraw"
+        assert fields["path"] == new_path
+        assert fields["stale_path"] == old_path
+
+        # execute_repair(decision, None) -- e.g. a retry following a failed
+        # startup install with no old path at all -- must not crash:
+        # withdraw_path(None) has nothing known to withdraw.
         daim_link_agent.apply_flow = lambda action, bridge, arg: True
         assert daim_link_agent.withdraw_path(None) is True
         result_path, event_name, fields = execute_repair(decision, None)
@@ -759,11 +903,134 @@ def test_execute_repair_reports_partial_failure_honestly():
         assert event_name == "repair_installed"
     finally:
         daim_link_agent.apply_flow = saved_apply_flow
+        daim_link_agent._conflicting_flow_cookie = saved_check
 
-    print("daim_link_agent execute_repair failure-honesty regression test: PASS "
-          "-- a partial installation failure is reported as repair_incomplete "
-          "with current_path set to None (not stale), and a degraded None "
-          "current_path does not crash a subsequent repair attempt.")
+    print("daim_link_agent execute_repair two-phase rollback regression test: "
+          "PASS -- a staging failure rolls back the partially-staged new path "
+          "and retains the untouched old path; a commit-step failure still "
+          "advances current_path but under a distinct stale-withdraw event; "
+          "and a None prior path does not crash a subsequent repair attempt.")
+
+
+def test_withdraw_stale_path_skips_boundary_hop_collisions():
+    """_withdraw_stale_path(old_path, new_path) -- execute_repair()'s commit
+    step -- must never issue a delete for a match new_path's own flows also
+    occupy. Found via a real live fault injection against the multi-OVS
+    testbed: a naive `withdraw_path(old_path)` at commit time deletes by
+    (cookie, in_port) match alone, and at the switch attached to SOURCE and
+    the one attached to DEST, one flow's match is IDENTICAL between
+    old_path and new_path (the host-attachment port never changes across
+    alternate routes) -- `install_path(new_path)` already updated that
+    entry's action in place during staging, so deleting it "to clean up the
+    old path" removed the just-installed, live, wanted entry instead,
+    leaving that hop with no matching flow at all in one direction. This
+    was confirmed live: after an otherwise-successful repair (logged as
+    `repair_installed`), `ovs-ofctl dump-flows` on both boundary switches
+    showed the colliding match completely empty -- a blackhole a
+    bookkeeping-only test could not have caught."""
+    old_path = ["s1", "s2", "s4"]
+    new_path = ["s1", "s3", "s4"]
+    calls = []
+    saved_apply_flow = daim_link_agent.apply_flow
+    try:
+        daim_link_agent.apply_flow = lambda action, bridge, arg: (
+            calls.append((action, bridge, arg)) or True
+        )
+        ok = daim_link_agent._withdraw_stale_path(old_path, new_path)
+        assert ok is True
+
+        colliding = {
+            (bridge, _delete_match(flow))
+            for bridge, flow in path_to_flows(old_path)
+        } & {
+            (bridge, _delete_match(flow))
+            for bridge, flow in path_to_flows(new_path)
+        }
+        assert colliding, "expected old_path and new_path to share a boundary-hop match"
+
+        issued = {(bridge, arg) for action, bridge, arg in calls}
+        assert not (issued & colliding), (
+            f"a delete must never be issued for a match new_path also occupies: "
+            f"{issued & colliding}"
+        )
+        # s2 is exclusive to old_path -- it must still be withdrawn normally.
+        assert any(bridge == "s2" for action, bridge, arg in calls), (
+            "old_path's own exclusive flows (s2) must still be withdrawn"
+        )
+        assert all(action == "delete" for action, bridge, arg in calls), (
+            "the commit step only ever deletes -- it never needs to add anything"
+        )
+    finally:
+        daim_link_agent.apply_flow = saved_apply_flow
+
+    print("daim_link_agent _withdraw_stale_path regression test: PASS -- "
+          "the commit step withdraws old_path's own exclusive flows but "
+          "never deletes a match new_path's staged flows also occupy.")
+
+
+def test_rollback_staged_path_restores_boundary_hop_collisions():
+    """_rollback_staged_path(new_path, old_path) -- execute_repair()'s
+    rollback step on a staging failure -- must RESTORE old_path's original
+    action at a match the two paths share, not merely delete it. A flow
+    whose match does not collide with old_path is purely additive (staging
+    created it from nothing), so deleting it is correct cleanup; but at the
+    boundary-hop matches (see test_withdraw_stale_path_skips_boundary_hop_collisions
+    above), staging already overwrote old_path's own live entry in place --
+    a plain delete there removes the entry outright, leaving old_path
+    missing a working flow at exactly that hop rather than genuinely "left
+    in place" as Section 5.2 requires. This was confirmed live alongside
+    the commit-side fix: the naive delete-everything-in-new_path rollback
+    left the same two boundary matches completely empty."""
+    old_path = ["s1", "s2", "s4"]
+    new_path = ["s1", "s3", "s4"]
+    calls = []
+    saved_apply_flow = daim_link_agent.apply_flow
+    try:
+        daim_link_agent.apply_flow = lambda action, bridge, arg: (
+            calls.append((action, bridge, arg)) or True
+        )
+        ok = daim_link_agent._rollback_staged_path(new_path, old_path)
+        assert ok is True
+
+        old_by_match = {
+            (bridge, _delete_match(flow)): flow
+            for bridge, flow in path_to_flows(old_path)
+        }
+        new_by_match = {
+            (bridge, _delete_match(flow)): flow
+            for bridge, flow in path_to_flows(new_path)
+        }
+        colliding_keys = set(old_by_match) & set(new_by_match)
+        assert colliding_keys, "expected old_path and new_path to share a boundary-hop match"
+
+        adds = {(bridge, arg) for action, bridge, arg in calls if action == "add"}
+        deletes = {(bridge, arg) for action, bridge, arg in calls if action == "delete"}
+
+        for bridge, match in colliding_keys:
+            restored_flow = old_by_match[(bridge, match)]
+            assert (bridge, restored_flow) in adds, (
+                f"a colliding match must be RESTORED to old_path's own action "
+                f"via an add-flow call, not merely deleted: expected add "
+                f"({bridge!r}, {restored_flow!r})"
+            )
+            assert (bridge, match) not in deletes, (
+                f"a colliding match must never be deleted outright: {(bridge, match)}"
+            )
+
+        non_colliding_keys = set(new_by_match) - colliding_keys
+        assert non_colliding_keys, "expected at least one purely-additive new_path flow"
+        for bridge, match in non_colliding_keys:
+            assert (bridge, match) in deletes, (
+                f"a purely-additive staged flow (no old_path counterpart) must "
+                f"be deleted during rollback, not left behind: {(bridge, match)}"
+            )
+    finally:
+        daim_link_agent.apply_flow = saved_apply_flow
+
+    print("daim_link_agent _rollback_staged_path regression test: PASS -- "
+          "a boundary-hop match shared with old_path is restored to "
+          "old_path's own action via add-flow, while a purely-additive "
+          "staged flow is deleted as ordinary rollback cleanup.")
 
 
 def test_bfs_and_flows_use_declared_source_dest_not_hardcoded_host_names():
@@ -794,12 +1061,18 @@ def test_bfs_and_flows_use_declared_source_dest_not_hardcoded_host_names():
             "a host node must never appear in a BFS-computed switch path"
         )
 
+        alpha_beta_cookie = f"{_agent_cookie():x}"
+        assert alpha_beta_cookie != _C, (
+            "a different protected pair (alpha/beta vs. h1/h2) must derive a "
+            "different cookie -- confirms the cookie is genuinely pair-scoped, "
+            "not still a fixed constant"
+        )
         flows = set(path_to_flows(path))
         assert flows == {
-            ("x1", "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:2"),
-            ("x1", "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:1"),
-            ("x2", "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:2"),
-            ("x2", "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:1"),
+            ("x1", f"cookie=0x{alpha_beta_cookie},priority=100,in_port=1,actions=output:2"),
+            ("x1", f"cookie=0x{alpha_beta_cookie},priority=100,in_port=2,actions=output:1"),
+            ("x2", f"cookie=0x{alpha_beta_cookie},priority=100,in_port=1,actions=output:2"),
+            ("x2", f"cookie=0x{alpha_beta_cookie},priority=100,in_port=2,actions=output:1"),
         }, (
             "path_to_flows() must resolve the declared SOURCE/DEST ('alpha'/'beta') "
             "to compute in_port/out_port, not crash or silently miscompute by "
@@ -816,23 +1089,25 @@ def test_bfs_and_flows_use_declared_source_dest_not_hardcoded_host_names():
 
 
 def test_delete_match_scopes_by_cookie_not_bare_in_port():
-    """_delete_match() must scope deletion by AGENT_COOKIE plus in_port, not
-    a bare in_port match. An earlier revision derived the delete match by
-    stripping the add-form flow string down to whatever was left
-    (flow.split(",actions=")[0].split(",",1)[1]), which dropped both the
-    cookie AND the priority field, leaving only "in_port=N" -- confirmed
+    """_delete_match() must scope deletion by the flow's own cookie plus
+    in_port, not a bare in_port match. An earlier revision derived the
+    delete match by stripping the add-form flow string down to whatever was
+    left (flow.split(",actions=")[0].split(",",1)[1]), which dropped both
+    the cookie AND the priority field, leaving only "in_port=N" -- confirmed
     empirically against a live OVS bridge that this deletes ANY flow
     sharing that in_port regardless of owner, priority, or match fields,
     including a real unrelated flow another process installed. Confirmed
-    empirically that a cookie-mask delete (cookie=<AGENT_COOKIE>/-1,in_port=N)
-    leaves that same unrelated flow untouched. This test checks the string
-    construction and the resulting apply_flow() call; the live OVS
-    behaviour itself was verified directly against a running bridge, not
-    re-verified here (this repo has no OVS instance to test against in
-    plain unit tests)."""
-    flow = "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:2"
+    empirically that a cookie-mask delete (cookie=<cookie>/-1,in_port=N)
+    leaves that same unrelated flow untouched. This test uses an arbitrary
+    test cookie (0xdeadbeef) to check _delete_match()'s parsing logic in
+    isolation from _agent_cookie()'s specific derivation, which
+    test_bfs_and_flows_use_declared_source_dest_not_hardcoded_host_names
+    covers separately; the live OVS behaviour itself was verified directly
+    against a running bridge, not re-verified here (this repo has no OVS
+    instance to test against in plain unit tests)."""
+    flow = "cookie=0xdeadbeef,priority=100,in_port=1,actions=output:2"
     match = _delete_match(flow)
-    assert match == "cookie=0x5e1fea9e/-1,in_port=1", match
+    assert match == "cookie=0xdeadbeef/-1,in_port=1", match
     assert "priority" not in match, (
         "non-strict del-flows rejects a literal priority= field outright "
         "(confirmed empirically: 'ovs-ofctl: unknown keyword priority') "
@@ -856,13 +1131,13 @@ def test_delete_match_scopes_by_cookie_not_bare_in_port():
         assert delete_calls, "withdraw_path must issue delete calls"
         for call in delete_calls:
             match_arg = call[3]
-            assert match_arg.startswith("cookie=0x5e1fea9e/-1,in_port="), match_arg
+            assert match_arg.startswith(f"cookie=0x{_C}/-1,in_port="), match_arg
             assert "priority" not in match_arg
     finally:
         daim_link_agent.subprocess.run = saved_run
 
     print("daim_link_agent cookie-scoped-deletion regression test: PASS -- "
-          "withdraw_path() deletes by AGENT_COOKIE + in_port, never a bare "
+          "withdraw_path() deletes by a cookie mask + in_port, never a bare "
           "in_port match or a rejected priority= field.")
 
 
@@ -879,9 +1154,11 @@ def test_execute_startup_install_reports_partial_failure():
     maybe_retry_repair() picks up the unfinished installation on a later
     tick, exactly as it does for a failed ongoing repair."""
     saved_apply_flow = daim_link_agent.apply_flow
+    saved_check = daim_link_agent._conflicting_flow_cookie
     down_edges = set()
     initial_path = ["s1", "s3", "s4"]
     try:
+        daim_link_agent._conflicting_flow_cookie = lambda bridge, flow: None
         daim_link_agent.apply_flow = lambda action, bridge, arg: True
         current_path, event_name, fields = execute_startup_install(initial_path, down_edges)
         assert current_path == initial_path
@@ -901,6 +1178,7 @@ def test_execute_startup_install_reports_partial_failure():
         assert fields["attempted_path"] == initial_path
     finally:
         daim_link_agent.apply_flow = saved_apply_flow
+        daim_link_agent._conflicting_flow_cookie = saved_check
 
     print("daim_link_agent startup-install failure-honesty regression test: PASS -- "
           "a partially-failed startup installation is reported as "
@@ -908,41 +1186,51 @@ def test_execute_startup_install_reports_partial_failure():
 
 
 def test_maybe_retry_repair_retries_until_success():
-    """A degraded current_path=None (from a partial-failure repair, Section
-    4.6) must not be a permanent dead end. Found by review: decide_link_event()
-    only starts a repair on a "down" event for an edge NOT already in
-    down_edges -- but a failed repair's edge is already in down_edges by the
-    time execute_repair() runs, so a duplicate transition on the same edge,
-    or no further transition at all (the physical link stays down and
-    nothing about it changes again), would never re-trigger a repair
-    attempt through the event-driven path alone. maybe_retry_repair(),
-    called from main()'s periodic poll_interval tick (not the OVSDB event
-    branch), is what gives a transient flow-installation failure -- a
-    remote OVS instance briefly unreachable, a timeout -- a way to
-    eventually succeed once conditions improve, with no new OVSDB event
-    ever required. Simulates exactly the scenario found by review: down ->
-    repair -> forced install failure -> no new link-state transition ->
-    retry on a later tick -> still failing -> retry again -> succeeds."""
+    """A retained-but-still-faulty current_path (from a staged-then-rolled-
+    back repair, Section 5.2) must not be a permanent dead end. Found by
+    review: decide_link_event() only starts a repair on a "down" event for
+    an edge NOT already in down_edges -- but a failed repair's edge is
+    already in down_edges by the time execute_repair() runs, so a
+    duplicate transition on the same edge, or no further transition at all
+    (the physical link stays down and nothing about it changes again),
+    would never re-trigger a repair attempt through the event-driven path
+    alone. maybe_retry_repair(), called from main()'s periodic
+    poll_interval tick (not the OVSDB event branch), is what gives a
+    transient flow-installation failure -- a remote OVS instance briefly
+    unreachable, a timeout -- a way to eventually succeed once conditions
+    improve, with no new OVSDB event ever required. Simulates exactly the
+    scenario found by review: down -> repair -> forced install failure
+    (old path retained, since it was never touched) -> no new link-state
+    transition -> retry on a later tick -> still failing (same old path
+    retained again) -> retry again -> succeeds."""
     saved_apply_flow = daim_link_agent.apply_flow
+    saved_check = daim_link_agent._conflicting_flow_cookie
+    old_path = ["s1", "s2", "s4"]
     down_edges = {frozenset({"s1", "s2"})}
     try:
-        # Simulate the original partial-failure repair that leaves
-        # current_path=None (Section 4.6's fix).
+        daim_link_agent._conflicting_flow_cookie = lambda bridge, flow: None
+        # Simulate a repair whose staging fails partway through: the OLD
+        # path is retained (Section 5.2's two-phase protocol never touches
+        # it), but that old path itself traverses the very edge that just
+        # went down, which is exactly when a retry is still needed.
         daim_link_agent.apply_flow = lambda action, bridge, arg: not (action == "add" and bridge == "s3")
         decision = {"action": "repair", "new_path": ["s1", "s3", "s4"]}
-        current_path, event_name, fields = execute_repair(decision, ["s1", "s2", "s4"])
-        assert current_path is None
+        current_path, event_name, fields = execute_repair(decision, old_path)
+        assert current_path == old_path, (
+            "a staging failure must retain the untouched old path, not degrade "
+            f"to None -- got {current_path!r}"
+        )
         assert event_name == "repair_incomplete"
 
         # No new link-state transition arrives -- decide_link_event() would
         # never re-trigger a repair for this edge (already in down_edges).
         # A later periodic tick (standing in for main()'s poll_interval
-        # wake-up) must retry anyway, since the underlying failure is
-        # still present.
+        # wake-up) must retry anyway, since current_path still traverses a
+        # down edge.
         current_path, event_name, fields = maybe_retry_repair(current_path, down_edges)
-        assert current_path is None, (
-            "a retry against the still-failing adapter must stay degraded, "
-            "not silently give up or falsely claim success"
+        assert current_path == old_path, (
+            "a retry against the still-failing adapter must retain the same "
+            "old path, not silently give up or falsely claim success"
         )
         assert event_name == "repair_incomplete"
 
@@ -952,12 +1240,13 @@ def test_maybe_retry_repair_retries_until_success():
         daim_link_agent.apply_flow = lambda action, bridge, arg: True
         current_path, event_name, fields = maybe_retry_repair(current_path, down_edges)
         assert current_path == ["s1", "s3", "s4"], (
-            "a degraded current_path must not be a permanent dead end once "
-            "the underlying flow-installation problem clears"
+            "a retained-but-faulty current_path must not be a permanent dead "
+            "end once the underlying flow-installation problem clears"
         )
         assert event_name == "repair_installed"
 
-        # Once healthy, further ticks must be no-ops (nothing to retry).
+        # Once healthy, further ticks must be no-ops (nothing to retry):
+        # current_path no longer traverses any down edge.
         current_path, event_name, fields = maybe_retry_repair(current_path, down_edges)
         assert event_name is None
         assert current_path == ["s1", "s3", "s4"]
@@ -965,6 +1254,8 @@ def test_maybe_retry_repair_retries_until_success():
         # If BFS genuinely finds no path at all (not a flow-install
         # problem), retrying must not loop pointlessly -- report a
         # distinct event instead of repeatedly calling execute_repair.
+        # current_path=None here stands in for a failed startup install,
+        # which has no old path to retain in the first place.
         unreachable_down_edges = {
             frozenset({"s1", "s2"}), frozenset({"s1", "s3"}),
         }
@@ -973,11 +1264,425 @@ def test_maybe_retry_repair_retries_until_success():
         assert event_name == "repair_retry_no_path"
     finally:
         daim_link_agent.apply_flow = saved_apply_flow
+        daim_link_agent._conflicting_flow_cookie = saved_check
 
     print("daim_link_agent repair-retry liveness regression test: PASS -- "
-          "a degraded current_path=None is retried on later ticks until the "
-          "underlying flow-installation failure clears, with no new OVSDB "
-          "event required to trigger the retry.")
+          "a retained-but-faulty current_path is retried on later ticks "
+          "until the underlying flow-installation failure clears, with no "
+          "new OVSDB event required to trigger the retry.")
+
+
+def test_agent_cookie_is_deterministic_and_pair_scoped():
+    """_agent_cookie() must return the identical value across repeated calls
+    for the same (SOURCE, DEST) pair -- deterministic across a restart is a
+    deliberate design property (Section 4.6): a restarted agent protecting
+    the same pair must still recognise, and be able to withdraw, flows a
+    prior instance of itself installed before the restart, which a
+    randomised-at-startup cookie would break. It must also differ between
+    two different pairs, so two agent processes protecting different pairs
+    on a switch they share do not collide and delete each other's flows --
+    the exact bug a single fixed AGENT_COOKIE constant (an earlier revision)
+    would reintroduce."""
+    saved = daim_link_agent.SOURCE, daim_link_agent.DEST
+    try:
+        daim_link_agent.SOURCE, daim_link_agent.DEST = "h1", "h2"
+        first = _agent_cookie()
+        second = _agent_cookie()
+        assert first == second, "the same (SOURCE, DEST) pair must always yield the same cookie"
+
+        daim_link_agent.SOURCE, daim_link_agent.DEST = "h3", "h4"
+        different_pair = _agent_cookie()
+        assert different_pair != first, (
+            "a different protected pair must yield a different cookie, or two "
+            "agents sharing a switch but protecting different pairs would "
+            "delete each other's flows"
+        )
+    finally:
+        daim_link_agent.SOURCE, daim_link_agent.DEST = saved
+
+    print("daim_link_agent cookie determinism/pair-scoping regression test: PASS -- "
+          "_agent_cookie() is stable across calls for the same pair and "
+          "distinct across different pairs, not a single fixed constant.")
+
+
+def test_resync_from_reconnect_updates_state_without_touching_holddown():
+    """resync_from_reconnect() must update interface_state/down_edges from a
+    fresh post-reconnect snapshot exactly like the startup-state fix does
+    for a fresh process (Section 4.4), but must not touch held_down_until --
+    reconnect is about regaining observability after a monitor child died,
+    not about repair timing, so an in-progress hold-down window continues
+    on its existing schedule unaffected. Also confirms an unrecognised
+    link_state is skipped (not applied, not raised -- a live server
+    misbehaving after reconnect should not crash an already-running agent)
+    and reported back to the caller."""
+    down_edges = set()
+    interface_state = {}
+    # "s3-eth1" is not in the default MONITORED_INTERFACES, so it must be
+    # ignored entirely (not reported as invalid, not applied) -- only a
+    # bogus state on a genuinely *monitored* interface ("s2-eth1" here)
+    # counts as the unrecognised-link_state case this test also checks.
+    snapshot = {"s1-eth2": "down", "s2-eth1": "bogus", "s3-eth1": "up"}
+    invalid = resync_from_reconnect(snapshot, down_edges, interface_state)
+    assert invalid == [("s2-eth1", "bogus")], invalid
+    assert interface_state.get("s1-eth2") == "down"
+    assert "s2-eth1" not in interface_state, (
+        "an unrecognised link_state must not be applied to interface_state"
+    )
+    assert "s3-eth1" not in interface_state, (
+        "an interface absent from MONITORED_INTERFACES must be ignored entirely"
+    )
+    assert frozenset({"s1", "s2"}) in down_edges, (
+        "s1-eth2 reporting down must add its edge to down_edges"
+    )
+
+    # Both interfaces of the s1-s2 edge now confirm up -> edge recovers.
+    down_edges2 = {frozenset({"s1", "s2"})}
+    interface_state2 = {"s1-eth2": "down", "s2-eth1": "down"}
+    resync_from_reconnect({"s1-eth2": "up", "s2-eth1": "up"}, down_edges2, interface_state2)
+    assert frozenset({"s1", "s2"}) not in down_edges2, (
+        "an edge must be discarded from down_edges once every interface "
+        "observing it confirms up, exactly as _edge_confirmed_up requires "
+        "elsewhere in this file"
+    )
+
+    print("daim_link_agent resync_from_reconnect regression test: PASS -- "
+          "state is reconciled from a fresh reconnect snapshot, an "
+          "unrecognised link_state is skipped and reported rather than "
+          "applied or raised, and hold-down timers are left untouched.")
+
+
+def test_monitor_link_rows_reconnects_on_stream_death():
+    """monitor_link_rows() must not permanently drop a target when its
+    monitor child's stream closes (EOF -- the ovsdb-client monitor child
+    died: a crash, a dropped OVSDB connection). An earlier revision just
+    removed the dead stream from the poll set and kept going, silently
+    blind to that target for the rest of the agent's run -- the same class
+    of gap the startup-state fix closed for a fresh process, left open at
+    runtime. This drives the actual select()/readline() reconnect path
+    against real OS pipes (not mocks), with _start_monitor() monkeypatched
+    to return a second real pipe standing in for the respawned child,
+    covering both a successful reconnect and a failed one."""
+    r1, w1 = os.pipe()
+    reader1, writer1 = os.fdopen(r1, "r"), os.fdopen(w1, "w")
+    r2, w2 = os.pipe()
+    reader2, writer2 = os.fdopen(r2, "r"), os.fdopen(w2, "w")
+
+    class FakeProc:
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    saved_start_monitor = daim_link_agent._start_monitor
+    try:
+        # A normal event on the original connection must still work.
+        writer1.write(json.dumps({
+            "headings": ["row", "action", "name", "link_state"],
+            "data": [["r1", "new", "s1-eth2", "down"]],
+        }) + "\n")
+        writer1.flush()
+
+        # Pre-load the reconnect target's initial snapshot, so
+        # read_initial_snapshot() (called synchronously inside the
+        # reconnect path) does not have to wait on the default timeout.
+        writer2.write(json.dumps({
+            "headings": ["row", "action", "name", "link_state"],
+            "data": [["r1", "initial", "s1-eth2", "up"]],
+        }) + "\n")
+        writer2.flush()
+
+        daim_link_agent._start_monitor = lambda target=None: FakeProc(reader2)
+
+        gen = daim_link_agent.monitor_link_rows({None: FakeProc(reader1)}, poll_interval=2.0)
+        assert next(gen) == ("s1-eth2", "down"), "a normal event must still be yielded first"
+
+        writer1.close()  # simulate the original monitor child dying (EOF)
+        event = next(gen)
+        assert event[0] == daim_link_agent.RECONNECT_EVENT
+        assert event[1] is None  # the local target
+        assert event[2] == {"s1-eth2": "up"}, event[2]
+
+        # The reconnected stream must now be the one actually polled.
+        writer2.write(json.dumps({
+            "headings": ["row", "action", "name", "link_state"],
+            "data": [["r2", "new", "s1-eth2", "down"]],
+        }) + "\n")
+        writer2.flush()
+        assert next(gen) == ("s1-eth2", "down"), (
+            "events must keep flowing from the newly-reconnected stream"
+        )
+        writer2.close()
+    finally:
+        daim_link_agent._start_monitor = saved_start_monitor
+        for f in (reader1, reader2):
+            try:
+                f.close()
+            except OSError:
+                pass
+
+    # Failure path: the reconnect attempt itself fails (e.g. respawn error
+    # or no initial snapshot within timeout) -- must yield a
+    # (RECONNECT_EVENT, target, None) rather than crashing the generator,
+    # and must not re-add that target to the poll set.
+    r3, w3 = os.pipe()
+    reader3, writer3 = os.fdopen(r3, "r"), os.fdopen(w3, "w")
+    try:
+        def failing_start_monitor(target=None):
+            raise RuntimeError("simulated respawn failure")
+        daim_link_agent._start_monitor = failing_start_monitor
+
+        gen = daim_link_agent.monitor_link_rows({None: FakeProc(reader3)}, poll_interval=2.0)
+        writer3.close()
+        event = next(gen)
+        assert event == (daim_link_agent.RECONNECT_EVENT, None, None), event
+        # Nothing left to poll -> the generator must end cleanly, not hang.
+        remaining = list(gen)
+        assert remaining == []
+    finally:
+        daim_link_agent._start_monitor = saved_start_monitor
+        try:
+            reader3.close()
+        except OSError:
+            pass
+
+    print("daim_link_agent monitor-reconnect regression test: PASS -- "
+          "a dead monitor stream triggers one reconnect attempt, resuming "
+          "event delivery on success and yielding a distinct failure event "
+          "(not crashing or hanging) when the reconnect itself fails.")
+
+
+def test_conflicting_flow_cookie_parses_dump_flows_output():
+    """_conflicting_flow_cookie() must parse `ovs-ofctl dump-flows` output
+    correctly: return the cookie of an existing flow at the exact
+    priority=100 match this agent is about to install over, None when the
+    match is free (or occupied only at a different priority -- confirmed
+    live that a non-strict dump-flows filter on in_port alone returns
+    every priority sharing that port, so the priority=100 check against
+    the returned lines is what narrows to the actual match, since
+    `priority=` itself is rejected as a dump-flows filter keyword,
+    confirmed empirically: 'ovs-ofctl: unknown keyword priority'), and
+    raise _ForwardingCheckError -- not silently return None -- when the
+    query itself could not be completed, so install_path() fails safe
+    instead of treating an unreadable switch as conflict-free."""
+    calls = []
+
+    def make_fake_run(stdout, returncode=0):
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            class Result:
+                pass
+            r = Result()
+            r.returncode = returncode
+            r.stdout = stdout
+            r.stderr = "" if returncode == 0 else "boom"
+            return r
+        return fake_run
+
+    saved_run = daim_link_agent.subprocess.run
+    flow = f"cookie=0x{_C},priority=100,in_port=1,actions=output:2"
+    try:
+        # Free match: no flow at all on this in_port.
+        daim_link_agent.subprocess.run = make_fake_run(
+            "OFPST_FLOW reply (OF1.3) (xid=0x2):\n"
+        )
+        assert daim_link_agent._conflicting_flow_cookie("s1", flow) is None
+        assert calls[-1][:4] == ["ovs-ofctl", "-O", "OpenFlow13", "dump-flows"]
+        assert calls[-1][-1] == "in_port=1"
+
+        # Occupied match: a different process's flow at priority=100.
+        daim_link_agent.subprocess.run = make_fake_run(
+            "OFPST_FLOW reply (OF1.3) (xid=0x6):\n"
+            " cookie=0xdeadbeef, duration=0.02s, table=0, n_packets=0, "
+            "n_bytes=0, priority=100,in_port=1 actions=output:9\n"
+        )
+        assert daim_link_agent._conflicting_flow_cookie("s1", flow) == "deadbeef"
+
+        # Same in_port, but only at a different priority -- not this
+        # agent's own match, so not a conflict for install_path()'s purposes.
+        daim_link_agent.subprocess.run = make_fake_run(
+            "OFPST_FLOW reply (OF1.3) (xid=0x6):\n"
+            " cookie=0xdeadbeef, duration=0.02s, table=0, n_packets=0, "
+            "n_bytes=0, priority=50,in_port=1 actions=output:9\n"
+        )
+        assert daim_link_agent._conflicting_flow_cookie("s1", flow) is None
+
+        # Query failure (non-zero exit) must fail safe, not return None.
+        daim_link_agent.subprocess.run = make_fake_run("", returncode=1)
+        try:
+            daim_link_agent._conflicting_flow_cookie("s1", flow)
+            assert False, "expected _ForwardingCheckError"
+        except daim_link_agent._ForwardingCheckError:
+            pass
+
+        # Query timeout must also fail safe.
+        def timeout_run(argv, **kwargs):
+            raise daim_link_agent.subprocess.TimeoutExpired(cmd=argv, timeout=5)
+        daim_link_agent.subprocess.run = timeout_run
+        try:
+            daim_link_agent._conflicting_flow_cookie("s1", flow)
+            assert False, "expected _ForwardingCheckError"
+        except daim_link_agent._ForwardingCheckError:
+            pass
+    finally:
+        daim_link_agent.subprocess.run = saved_run
+
+    print("daim_link_agent forwarding-consistency dump-flows-parsing "
+          "regression test: PASS -- an occupied priority=100 match returns "
+          "its cookie, a free or different-priority match returns None, and "
+          "a failed or timed-out query raises _ForwardingCheckError instead "
+          "of returning None.")
+
+
+def test_install_path_rejects_forwarding_conflict():
+    """install_path() must not call apply_flow("add", ...) for a flow whose
+    exact match is already occupied by a different process's flow (a
+    foreign cookie), and must report the whole call as failed -- Section
+    5.1's forwarding-consistency check, the higher-priority of the two
+    checks that section flagged as unimplemented. Re-installing over this
+    agent's OWN prior flow (same cookie) must still proceed normally: that
+    is a legitimate re-install (e.g. a retried repair), not a conflict. A
+    pre-check that could not be completed at all must also block the add,
+    fail-safe, exactly like a real conflict."""
+    add_calls = []
+    logged = []
+
+    def fake_apply_flow(action, bridge, arg):
+        if action == "add":
+            add_calls.append((bridge, arg))
+        return True
+
+    def fake_log(event, **fields):
+        if event == "forwarding_conflict_rejected":
+            logged.append(fields)
+
+    saved_apply_flow = daim_link_agent.apply_flow
+    saved_log = daim_link_agent.log
+    saved_check = daim_link_agent._conflicting_flow_cookie
+    path = ["s1", "s3", "s4"]
+    my_cookie = _C
+    try:
+        daim_link_agent.apply_flow = fake_apply_flow
+        daim_link_agent.log = fake_log
+
+        # A foreign cookie on switch s3 only -- that switch's two flows
+        # must be rejected; s1's and s4's flows (no conflict) must still
+        # install, but the overall call must still be reported as failed.
+        def conflict_on_s3(bridge, flow):
+            return "deadbeef" if bridge == "s3" else None
+        daim_link_agent._conflicting_flow_cookie = conflict_on_s3
+        ok = daim_link_agent.install_path(path)
+        assert ok is False, (
+            "a foreign-cookie conflict on any switch must fail the whole "
+            "install_path() call"
+        )
+        assert all(bridge != "s3" for bridge, _ in add_calls), (
+            "a flow whose match is occupied by a foreign cookie must never "
+            "reach apply_flow()"
+        )
+        assert any(bridge == "s1" for bridge, _ in add_calls) and \
+            any(bridge == "s4" for bridge, _ in add_calls), (
+            "switches with no conflict must still be installed even though "
+            "a different switch in the same path was rejected"
+        )
+        assert logged and logged[0]["existing_cookie"] == "deadbeef"
+
+        # Same cookie as this agent's own -- not a conflict, a legitimate
+        # re-install proceeds normally.
+        add_calls.clear()
+        logged.clear()
+        daim_link_agent._conflicting_flow_cookie = lambda bridge, flow: my_cookie
+        ok = daim_link_agent.install_path(path)
+        assert ok is True
+        assert len(add_calls) == 6
+        assert logged == []
+
+        # A pre-check that could not be completed at all must also block
+        # the add, fail-safe -- not be treated as "no conflict found".
+        add_calls.clear()
+        def always_fails(bridge, flow):
+            raise daim_link_agent._ForwardingCheckError()
+        daim_link_agent._conflicting_flow_cookie = always_fails
+        ok = daim_link_agent.install_path(path)
+        assert ok is False
+        assert add_calls == [], (
+            "an incomplete pre-check must block the add, not silently proceed"
+        )
+    finally:
+        daim_link_agent.apply_flow = saved_apply_flow
+        daim_link_agent.log = saved_log
+        daim_link_agent._conflicting_flow_cookie = saved_check
+
+    print("daim_link_agent forwarding-consistency install_path() regression "
+          "test: PASS -- a foreign-cookie conflict on one switch blocks only "
+          "that switch's flows and fails the whole call, re-installing this "
+          "agent's own cookie proceeds normally, and an incomplete pre-check "
+          "fails safe instead of proceeding.")
+
+
+def test_boundary_hop_flow_match_collides_across_alternate_paths():
+    """Documents the root cause `_withdraw_stale_path()`/
+    `_rollback_staged_path()` (above) exist to handle: at the switch
+    directly attached to SOURCE and the switch directly attached to DEST,
+    one of the two flow entries has a match -- (cookie, priority=100,
+    in_port) -- that is IDENTICAL across every alternate path through that
+    switch, because the host-attachment port never changes regardless of
+    which downstream route is chosen. `path_to_flows()`'s SOURCE-facing
+    flow at the first switch, and its DEST-facing flow at the last switch,
+    therefore collide between the old path and any new alternate path
+    sharing that switch -- confirmed here by comparing `_delete_match()`
+    output, not by a live OVS call (Section 4.6's existing live
+    verification already confirms `add-flow` at an identical match
+    replaces the existing entry's action in place, rather than coexisting
+    as a second entry). This means "staging" those TWO specific flow
+    entries is not actually a non-disruptive, side-by-side install the way
+    staging an interior hop's flows is: the moment `install_path()` reaches
+    them, the switch's live forwarding action for that hop changes
+    immediately, before the rest of the new path is verified or the repair
+    has committed. A naive commit/rollback that deletes by match alone does
+    not undo that -- it deletes the entry outright rather than restoring or
+    leaving it -- confirmed as a real live blackhole against the multi-OVS
+    testbed before `_withdraw_stale_path()`/`_rollback_staged_path()`
+    replaced the naive plain-`withdraw_path()` calls an earlier revision of
+    `execute_repair()` used; those two functions' own dedicated tests
+    (`test_withdraw_stale_path_skips_boundary_hop_collisions`,
+    `test_rollback_staged_path_restores_boundary_hop_collisions`) confirm
+    the fix. This test only documents that the collision itself exists and
+    is exactly one flow per boundary switch, not two."""
+    old_path = ["s1", "s2", "s4"]
+    new_path = ["s1", "s3", "s4"]
+    old_deletes = {bridge: set() for bridge in ("s1", "s2", "s4")}
+    for bridge, flow in path_to_flows(old_path):
+        old_deletes[bridge].add(_delete_match(flow))
+    new_deletes = {bridge: set() for bridge in ("s1", "s3", "s4")}
+    for bridge, flow in path_to_flows(new_path):
+        new_deletes[bridge].add(_delete_match(flow))
+
+    shared_s1 = old_deletes["s1"] & new_deletes["s1"]
+    shared_s4 = old_deletes["s4"] & new_deletes["s4"]
+    assert len(shared_s1) == 1, (
+        f"expected exactly one colliding match at the SOURCE-facing switch: {shared_s1}"
+    )
+    assert len(shared_s4) == 1, (
+        f"expected exactly one colliding match at the DEST-facing switch: {shared_s4}"
+    )
+    # The OTHER flow at each of those switches (the one facing the
+    # downstream neighbour, which DOES differ between the two paths) must
+    # NOT collide -- only one of the two flows at each boundary switch is
+    # affected, not both.
+    assert len(old_deletes["s1"] - new_deletes["s1"]) == 1
+    assert len(old_deletes["s4"] - new_deletes["s4"]) == 1
+    # s2 (interior to the old path only) is not touched by the new path's
+    # install at all -- new_path never has a flow on s2 -- confirming
+    # interior hops genuinely stage additively, with none of the
+    # boundary-hop collision risk (match strings alone don't encode which
+    # bridge they're on, so this must be checked per-bridge, not by
+    # comparing bare match strings across different switches).
+    assert "s2" not in new_deletes
+
+    print("daim_link_agent boundary-hop match-collision documentation test: "
+          "PASS -- the SOURCE-facing and DEST-facing switches each have "
+          "exactly one flow entry whose match is shared with every "
+          "alternate path, confirming two-phase staging's non-disruptive "
+          "guarantee holds for interior hops but not for those two boundary "
+          "entries (Section 8.3).")
 
 
 def main():
@@ -996,10 +1701,18 @@ def main():
     test_multi_ovs_target_routing()
     test_apply_flow_routes_remote_bridge_through_adapter()
     test_execute_repair_reports_partial_failure_honestly()
+    test_withdraw_stale_path_skips_boundary_hop_collisions()
+    test_rollback_staged_path_restores_boundary_hop_collisions()
     test_bfs_and_flows_use_declared_source_dest_not_hardcoded_host_names()
     test_delete_match_scopes_by_cookie_not_bare_in_port()
     test_execute_startup_install_reports_partial_failure()
     test_maybe_retry_repair_retries_until_success()
+    test_agent_cookie_is_deterministic_and_pair_scoped()
+    test_resync_from_reconnect_updates_state_without_touching_holddown()
+    test_monitor_link_rows_reconnects_on_stream_death()
+    test_conflicting_flow_cookie_parses_dump_flows_output()
+    test_install_path_rejects_forwarding_conflict()
+    test_boundary_hop_flow_match_collides_across_alternate_paths()
 
 
 if __name__ == "__main__":

@@ -17,8 +17,10 @@ Simplification documented for the evidence record: the topology graph below
 is declared, not discovered via LLDP or the DAIM_LINK_TABLE. Extending this
 to live topology discovery is a separate increment.
 """
+import hashlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -169,12 +171,30 @@ def bfs_path(source, dest, down_edges):
     return None
 
 
-# Tags every flow this agent installs, so a withdrawal can be scoped to
-# exactly this agent's own flows (see _delete_match() below) rather than
-# matching broadly on in_port alone, which would also delete an unrelated
-# flow some other DAIM-OS process installed on the same switch/port.
-# Arbitrary distinguishing value; not derived from anything.
-AGENT_COOKIE = 0x5E1FEA9E
+def _agent_cookie():
+    """The OpenFlow cookie this agent tags its own flows with, so a
+    withdrawal can be scoped to exactly this agent's flows (see
+    _delete_match() below) rather than matching broadly on in_port alone,
+    which would also delete an unrelated flow some other DAIM-OS process
+    installed on the same switch/port. Deterministic, derived from the
+    declared SOURCE/DEST pair (read live, like REMOTE_ENDPOINTS elsewhere in
+    this file, so a deployment overriding them via load_topology_config()
+    gets its own cookie) via a truncated SHA-256 digest, rather than a
+    single fixed constant an earlier revision used -- that constant was
+    correct for the one-agent-per-process deployments measured in this
+    paper, but would collide if two agent processes ever protected
+    different source-destination pairs on a switch they share: both would
+    use the identical cookie, and each agent's withdrawal calls would
+    delete the other's flows too, exactly the bug the fixed constant was
+    introduced to close. Section 4.1's declared deployment model is one
+    process per protected pair, so keying the cookie to that pair is the
+    natural scope, not the process or the topology. Deterministic across
+    restarts (not randomised at startup) is deliberate: a restarted agent
+    protecting the same pair must still recognise, and be able to
+    withdraw, flows a prior instance of itself installed before the
+    restart."""
+    digest = hashlib.sha256(f"{SOURCE}->{DEST}".encode()).hexdigest()
+    return int(digest[:8], 16)
 
 
 def path_to_flows(path):
@@ -183,17 +203,79 @@ def path_to_flows(path):
     globals at call time (like REMOTE_ENDPOINTS elsewhere in this file) so a
     deployment that overrides them via load_topology_config() is honoured;
     an earlier revision hardcoded the literal host names "h1"/"h2" here
-    instead. Every flow carries AGENT_COOKIE so withdraw_path() can scope
-    its delete calls to this agent's own flows only (see _delete_match())."""
+    instead. Every flow carries this agent's cookie (_agent_cookie()) so
+    withdraw_path() can scope its delete calls to this agent's own flows
+    only (see _delete_match())."""
     flows = []
+    cookie = _agent_cookie()
     hops = [SOURCE] + path + [DEST]
     for i in range(1, len(hops) - 1):
         switch, prev_node, next_node = hops[i], hops[i - 1], hops[i + 1]
         in_port = TOPOLOGY[switch][prev_node][0]
         out_port = TOPOLOGY[switch][next_node][0]
-        flows.append((switch, f"cookie=0x{AGENT_COOKIE:x},priority=100,in_port={in_port},actions=output:{out_port}"))
-        flows.append((switch, f"cookie=0x{AGENT_COOKIE:x},priority=100,in_port={out_port},actions=output:{in_port}"))
+        flows.append((switch, f"cookie=0x{cookie:x},priority=100,in_port={in_port},actions=output:{out_port}"))
+        flows.append((switch, f"cookie=0x{cookie:x},priority=100,in_port={out_port},actions=output:{in_port}"))
     return flows
+
+
+def _openflow_target(bridge):
+    """The `ovs-ofctl` target for `bridge`: its registered remote OpenFlow
+    endpoint (a `tcp:HOST:PORT` string) if `bridge` is in REMOTE_ENDPOINTS,
+    otherwise the bridge name unchanged for a local bridge. Shared by
+    apply_flow() (through the daim_ovs_flow adapter) and
+    _conflicting_flow_cookie() (a direct, read-only ovs-ofctl call) so the
+    two never resolve a bridge to different targets."""
+    remote = REMOTE_ENDPOINTS.get(bridge)
+    return remote["openflow"] if remote else bridge
+
+
+class _ForwardingCheckError(Exception):
+    """Raised by _conflicting_flow_cookie() when the read-before-write
+    dump-flows query itself could not be completed (timeout or non-zero
+    exit), as opposed to completing and finding no conflict. Kept distinct
+    from "no conflict found" so install_path() can fail safe: an unreadable
+    switch state is treated as a possible conflict, not as a green light."""
+
+
+def _conflicting_flow_cookie(bridge, flow):
+    """Section 5.1's forwarding-consistency check: a read-before-write query
+    -- direct `ovs-ofctl dump-flows`, not the DAIM-OS OVS adapter, since
+    `daim_ovs_flow` only exposes `add`/`delete` (see daim_ovs_flow.c) and
+    this is a read, not an installation, so it does not touch the adapter's
+    "flows are installed through the adapter" claim (Section 4.1), which is
+    about how flows are installed, not how existing switch state is read
+    for a safety pre-check -- for any flow already occupying the exact
+    `priority=100,in_port=N` match `flow` is about to use on `bridge`.
+    Returns that flow's cookie (as a lowercase hex string with no `0x`
+    prefix) if one is installed there, or None if the match is free.
+    `ovs-ofctl dump-flows <target> priority=100,in_port=N` is rejected
+    outright (`unknown keyword priority`, confirmed empirically -- the same
+    restriction non-strict `del-flows` has, see _delete_match() above), so
+    this filters on `in_port=N` alone and checks `priority=100` in the
+    returned lines instead. Without this check, install_path() would call
+    `apply_flow("add", ...)` unconditionally, and OVS's `add-flow` at an
+    already-occupied exact priority+match is a silent in-place replace, not
+    a coexist or a rejection -- confirmed empirically -- so a second
+    process's flow at that match would be overwritten with no record of
+    what was lost."""
+    target = _openflow_target(bridge)
+    in_port = flow.split("in_port=")[1].split(",")[0]
+    argv = ["ovs-ofctl", "-O", "OpenFlow13", "dump-flows", target, f"in_port={in_port}"]
+    try:
+        r = subprocess.run(argv, text=True, capture_output=True, timeout=5)
+    except subprocess.TimeoutExpired:
+        log("forwarding_check_timeout", bridge=bridge, flow=flow)
+        raise _ForwardingCheckError()
+    if r.returncode != 0:
+        log("forwarding_check_error", bridge=bridge, flow=flow, stderr=r.stderr.strip())
+        raise _ForwardingCheckError()
+    for line in r.stdout.splitlines():
+        if "priority=100," not in line:
+            continue
+        match = re.search(r"cookie=0x([0-9a-fA-F]+)", line)
+        if match:
+            return match.group(1)
+    return None
 
 
 def apply_flow(action, bridge, arg):
@@ -220,8 +302,7 @@ def apply_flow(action, bridge, arg):
     the adapter's `valid_token()` length/newline validation on the remote
     target argument, which the direct-`ovs-ofctl` version did not have."""
     log("flow_start", action=action, bridge=bridge, arg=arg)
-    remote = REMOTE_ENDPOINTS.get(bridge)
-    target = remote["openflow"] if remote else bridge
+    target = _openflow_target(bridge)
     argv = [str(CLI), action, target, arg]
     try:
         r = subprocess.run(argv, text=True, capture_output=True, timeout=5)
@@ -235,9 +316,31 @@ def apply_flow(action, bridge, arg):
 
 
 def install_path(path):
-    """Returns True only if every flow-add call for `path` succeeded."""
+    """Returns True only if every flow-add call for `path` succeeded, and
+    none of them would have overwritten a conflicting flow entry a
+    different process already installed at the same priority/match
+    (Section 5.1's forwarding-consistency check). Before every add, queries
+    _conflicting_flow_cookie() for the exact match this flow is about to
+    use; if that match is already occupied by a flow bearing some other
+    cookie -- installed by a different DAIM-OS process, not a prior
+    installation by this same agent -- the add is skipped and the whole
+    call is treated as failed, exactly like a real apply_flow() failure,
+    logging forwarding_conflict_rejected instead of silently overwriting
+    it. A pre-check that could not be completed (_ForwardingCheckError) is
+    treated the same way: fail safe, since an unreadable switch state is a
+    possible conflict, not a confirmed absence of one."""
+    my_cookie = f"{_agent_cookie():x}"
     ok = True
     for bridge, flow in path_to_flows(path):
+        try:
+            existing_cookie = _conflicting_flow_cookie(bridge, flow)
+        except _ForwardingCheckError:
+            ok = False
+            continue
+        if existing_cookie is not None and existing_cookie != my_cookie:
+            log("forwarding_conflict_rejected", bridge=bridge, flow=flow, existing_cookie=existing_cookie)
+            ok = False
+            continue
         if not apply_flow("add", bridge, flow):
             ok = False
     return ok
@@ -245,9 +348,14 @@ def install_path(path):
 
 def _delete_match(flow):
     """Builds the delete match for one previously-installed flow: a cookie
-    mask scoped to this agent's own flows (AGENT_COOKIE), plus the flow's
-    `in_port`. Deliberately NOT derived by stripping the `add`-form string
-    down to whatever is left over -- an earlier revision did exactly that
+    mask scoped to this agent's own flows, plus the flow's `in_port`. The
+    cookie value is parsed out of `flow` itself, the same string
+    `path_to_flows()` embedded it into, rather than recomputed by calling
+    `_agent_cookie()` a second time -- deleting exactly what was actually
+    installed, not whatever the live `SOURCE`/`DEST` globals would produce
+    now if they happened to change between install and withdraw. Deliberately
+    NOT derived by stripping the `add`-form string down to whatever is left
+    over -- an earlier revision did exactly that
     (`flow.split(",actions=")[0].split(",", 1)[1]`), which dropped BOTH the
     cookie and the priority field, leaving only a bare `in_port=N` match.
     That match is dangerously broad: OVS's `ovs-ofctl del-flows` without
@@ -261,13 +369,14 @@ def _delete_match(flow):
     empirically -- this is the actual reason an earlier revision stripped
     it, not merely a style choice). A cookie mask, by contrast, IS accepted
     by non-strict `del-flows` and correctly scopes the match: confirmed
-    empirically that `cookie=<AGENT_COOKIE>/-1,in_port=N` deletes only this
+    empirically that `cookie=<cookie>/-1,in_port=N` deletes only this
     agent's own flow and leaves an unrelated same-`in_port` flow with a
     different (or absent) cookie completely untouched. No change to the
     DAIM-OS OVS adapter (`daim_ovs_flow`) was needed for this -- cookie
     scoping works through the same unmodified `add`/`delete` CLI."""
+    cookie = flow.split("cookie=0x")[1].split(",")[0]
     in_port = flow.split("in_port=")[1].split(",")[0]
-    return f"cookie=0x{AGENT_COOKIE:x}/-1,in_port={in_port}"
+    return f"cookie=0x{cookie}/-1,in_port={in_port}"
 
 
 def withdraw_path(path):
@@ -286,53 +395,140 @@ def withdraw_path(path):
     return ok
 
 
-def execute_repair(decision, current_path):
-    """Executes the I/O for a "repair" decision: withdraws the old path,
-    installs the new one, and reports what actually happened -- it does NOT
-    claim success (does not use the `repair_installed` event name, does not
-    advance the caller's `current_path` to the new path) unless every flow
-    add/delete call across both withdraw and install actually succeeded. An
-    earlier revision of this logic (inline in main()'s loop) called
-    `install_path()` and `withdraw_path()` for their side effects only,
-    discarding whether any individual `apply_flow()` call failed, then
-    unconditionally logged `repair_installed` and advanced `current_path`
-    regardless -- so a partially-failed installation (a remote OVS instance
-    unreachable, a timeout, a rejected flow) was silently reported as a
-    clean repair, with nothing in the log distinguishing it from a real one.
+def _withdraw_stale_path(old_path, new_path):
+    """The commit half of execute_repair()'s two-phase protocol (Section
+    5.2): withdraws `old_path`'s flows EXCEPT any whose (bridge, cookie,
+    in_port) match is also occupied by `new_path`. Confirmed live against
+    the multi-OVS testbed that a plain `withdraw_path(old_path)` here is
+    unsafe: at the switch directly attached to SOURCE and the one directly
+    attached to DEST, one flow's match is identical across every alternate
+    path through that switch (the host-attachment port never changes) --
+    see test_boundary_hop_flow_match_collides_across_alternate_paths.
+    `install_path(new_path)` already updated that shared-match entry IN
+    PLACE to the new path's action during staging (OVS `add-flow` at an
+    identical match replaces the action, it does not create a second,
+    coexisting entry); a plain `withdraw_path(old_path)` would then issue
+    a delete for that same match as part of "cleaning up the old path" and
+    remove the entry outright -- deleting the flow this repair JUST
+    installed, not anything stale. Confirmed with a real fault injection
+    against a real two-VM OVS testbed: the naive implementation left both
+    boundary switches completely without a matching flow entry in one
+    direction after an otherwise-`repair_installed`-reported repair, a
+    live blackhole a purely bookkeeping-level test could not have caught."""
+    new_matches = {
+        (bridge, _delete_match(flow)) for bridge, flow in path_to_flows(new_path)
+    }
+    ok = True
+    for bridge, flow in path_to_flows(old_path):
+        match = _delete_match(flow)
+        if (bridge, match) in new_matches:
+            continue
+        if not apply_flow("delete", bridge, match):
+            ok = False
+    return ok
 
-    On any failure, the returned `current_path` is `None`, not the prior
-    `current_path` value -- an earlier revision of *this* fix returned the
-    prior value unchanged, which is itself unsound: `withdraw_path(current_path)`
-    already ran before `install_path()`, so if withdrawal succeeded but
-    installation then failed, the switches no longer hold the old path
-    either, and reporting the old path as still current would let a later
-    repair's `withdraw_path(current_path)` issue delete calls against flows
-    that no longer reflect reality. `None` means "forwarding state is not
-    reliably known"; `withdraw_path(None)` (above) treats that as nothing to
-    withdraw rather than crashing or guessing, and `decide_link_event`'s
-    `new_path == current_path` no-op check naturally never matches `None`,
-    so the next fault event always attempts a fresh repair instead of
-    silently trusting stale bookkeeping. This still does not implement the
-    two-phase staged/commit/rollback protocol Section 5.2 specifies -- flows
-    that DID succeed before a failure are not undone, and the network can
-    still be left in a mixed old/new state exactly as Section 4.6 already
-    documents -- it only stops the agent from claiming, or continuing to
-    rely on, a success it did not achieve. Returns (new_current_path,
-    event_name, event_fields) for the caller to log."""
+
+def _rollback_staged_path(new_path, old_path):
+    """The rollback half of execute_repair()'s two-phase protocol (Section
+    5.2), used when staging `new_path` fails partway through: undoes
+    whatever of `new_path` DID get staged, restoring `old_path` -- not
+    merely deleting `new_path`'s flows the way an earlier revision of this
+    rollback did. For a flow whose match does not collide with `old_path`,
+    deleting it is correct: it was purely additive, so there is nothing to
+    restore. For a flow whose match DOES collide with `old_path` (see
+    `_withdraw_stale_path` above), staging already overwrote that entry's
+    action in place; a plain delete there would remove the entry outright,
+    leaving `old_path` down a working flow at exactly that hop rather than
+    genuinely "left in place" as Section 5.2 requires. Instead, `old_path`'s
+    own original flow is RE-INSTALLED at that match -- an `add-flow` at the
+    same match, replacing the action back to what it was before staging
+    touched it, exactly mirroring how staging itself got there. Confirmed
+    live (alongside `_withdraw_stale_path`) that the naive
+    delete-everything-in-new_path version of this rollback leaves the
+    colliding entry missing (not restored), the same live blackhole its
+    commit-side counterpart has."""
+    old_by_match = {
+        (bridge, _delete_match(flow)): (bridge, flow)
+        for bridge, flow in path_to_flows(old_path)
+    }
+    ok = True
+    for bridge, flow in path_to_flows(new_path):
+        match = _delete_match(flow)
+        collision = old_by_match.get((bridge, match))
+        if collision is not None:
+            restore_bridge, restore_flow = collision
+            if not apply_flow("add", restore_bridge, restore_flow):
+                ok = False
+        elif not apply_flow("delete", bridge, match):
+            ok = False
+    return ok
+
+
+def execute_repair(decision, current_path):
+    """Executes the I/O for a "repair" decision using the two-phase
+    prepare/commit protocol Section 5.2 specifies: the new path's flows are
+    staged (installed) FIRST, and the old path's flows are only withdrawn
+    -- "commit" -- once every new-path install call has actually succeeded.
+    An earlier revision withdrew the old path unconditionally BEFORE
+    attempting the new install, so a partial installation failure left the
+    switches holding neither the old path nor the new one, and the only
+    honest thing that revision could report was `current_path=None`
+    ("forwarding state is not reliably known"). Staging first instead means
+    a failed install never touches the old path at all -- except at the
+    boundary-hop matches `_rollback_staged_path()`/`_withdraw_stale_path()`
+    (above) exist specifically to handle: SOURCE's and DEST's attached
+    switches each have one flow whose match is identical across every
+    alternate path (the host-attachment port never changes), so staging
+    already updated that entry in place, and a plain
+    `withdraw_path()`/delete-everything-staged rollback would delete that
+    entry outright rather than leave (commit) or restore (rollback) it --
+    confirmed as a real live blackhole against the multi-OVS testbed before
+    these two helpers replaced the naive plain-`withdraw_path()` calls an
+    earlier revision of this function used. On failure, `current_path`
+    stays unchanged -- not `None` -- because `old_path` is now genuinely
+    still known to be the switches' actual forwarding state, confirmed
+    untouched (or, for the boundary hop, actively restored) by this
+    attempt. A `None` `current_path` -- e.g. following a failed
+    `execute_startup_install()`, where there never was an old path to
+    preserve -- has nothing to protect, so rollback falls back to a plain
+    `withdraw_path(new_path)` in that case.
+
+    If staging succeeds but the commit step (withdrawing the old path)
+    then fails partway through, forwarding is still correct -- the new
+    path is fully installed and is what traffic actually follows now -- so
+    `current_path` still advances to the new path, but this is reported
+    under the distinct `repair_installed_stale_withdraw` event rather than
+    a clean `repair_installed`, since the old path's flows are left behind
+    as uncleaned, stale leftovers rather than a forwarding problem.
+
+    Returns (new_current_path, event_name, event_fields) for the caller to
+    log."""
+    new_path = decision["new_path"]
     repair_start_ns = time.perf_counter_ns()
-    withdraw_ok = withdraw_path(current_path)
-    install_ok = install_path(decision["new_path"])
+    install_ok = install_path(new_path)
+    if not install_ok:
+        if current_path is None:
+            withdraw_path(new_path)
+        else:
+            _rollback_staged_path(new_path, current_path)
+        repair_end_ns = time.perf_counter_ns()
+        return current_path, "repair_incomplete", {
+            "attempted_path": new_path, "prior_path": current_path,
+            "install_ok": False,
+            "repair_start_ns": repair_start_ns, "repair_end_ns": repair_end_ns,
+        }
+    withdraw_ok = True if current_path is None else _withdraw_stale_path(current_path, new_path)
     repair_end_ns = time.perf_counter_ns()
-    if withdraw_ok and install_ok:
-        return decision["new_path"], "repair_installed", {
-            "path": decision["new_path"],
+    if withdraw_ok:
+        return new_path, "repair_installed", {
+            "path": new_path,
             "repair_start_ns": repair_start_ns, "repair_end_ns": repair_end_ns,
             "held_down_seconds": HOLD_DOWN_SECONDS,
         }
-    return None, "repair_incomplete", {
-        "attempted_path": decision["new_path"], "prior_path": current_path,
-        "withdraw_ok": withdraw_ok, "install_ok": install_ok,
+    return new_path, "repair_installed_stale_withdraw", {
+        "path": new_path, "stale_path": current_path,
         "repair_start_ns": repair_start_ns, "repair_end_ns": repair_end_ns,
+        "held_down_seconds": HOLD_DOWN_SECONDS,
     }
 
 
@@ -346,34 +542,62 @@ def execute_startup_install(current_path, down_edges):
     of defect `execute_repair()` fixes for the ongoing repair path, found on
     the startup path by a second look at the same review.
 
-    On failure, the returned current_path is `None`, exactly like
-    `execute_repair()`'s failure case -- not a distinct "broken at startup"
-    state -- so the agent does not silently start in a state it believes is
-    healthy, and `maybe_retry_repair()`'s periodic retry (below) picks up
-    the unfinished installation on the next tick, with no special-casing
-    needed for "this failure happened during startup" versus "this failure
-    happened during an ongoing repair". Returns (new_current_path,
-    event_name, event_fields) for the caller to log."""
+    On failure, whatever flows DID get staged before the failure are rolled
+    back (`withdraw_path(current_path)`) -- there is no old path to
+    preserve at startup the way `execute_repair()`'s two-phase protocol
+    (Section 5.2) preserves one for an ongoing repair, but the same
+    don't-leave-partial-flows-behind principle applies, so this degenerate
+    "no old path" case is cleaned up the same way rather than left as a mix
+    of installed and missing flows. The returned current_path is `None`,
+    exactly like `execute_repair()`'s failure case -- not a distinct
+    "broken at startup" state -- so the agent does not silently start in a
+    state it believes is healthy, and `maybe_retry_repair()`'s periodic
+    retry (below) picks up the unfinished installation on the next tick,
+    with no special-casing needed for "this failure happened during
+    startup" versus "this failure happened during an ongoing repair".
+    Returns (new_current_path, event_name, event_fields) for the caller to
+    log."""
     if install_path(current_path):
         return current_path, "agent_started", {
             "initial_path": current_path,
             "down_edges": [list(edge) for edge in down_edges],
         }
+    withdraw_path(current_path)
     return None, "startup_install_incomplete", {
         "attempted_path": current_path,
         "down_edges": [list(edge) for edge in down_edges],
     }
 
 
+def _path_uses_down_edge(path, down_edges):
+    """Whether `path` (a list of switch names, hop by hop) traverses any
+    edge in `down_edges`. Used by maybe_retry_repair() below: since
+    execute_repair()'s two-phase protocol (Section 5.2) now retains the
+    OLD path on a failed repair instead of degrading to
+    `current_path=None`, "is a retry still needed" can no longer be
+    answered by checking `current_path is None` alone -- a retained old
+    path may itself traverse the very edge that just went down and
+    triggered the failed repair in the first place, which is exactly when
+    a retry is still required."""
+    return any(
+        frozenset({path[i], path[i + 1]}) in down_edges
+        for i in range(len(path) - 1)
+    )
+
+
 def maybe_retry_repair(current_path, down_edges):
-    """If `current_path` is `None` -- the agent's forwarding state was left
-    unknown by a prior partial-failure repair or startup install (see
-    `execute_repair()`/`execute_startup_install()`) -- attempts a fresh
-    repair, recomputing the BFS path against the current `down_edges`
-    rather than reusing whichever attempt failed. Returns
+    """If `current_path` is `None` (forwarding state genuinely unknown,
+    e.g. following a failed `execute_startup_install()`, which has no old
+    path to fall back to) or `current_path` is known but traverses an edge
+    in `down_edges` (a repair attempt staged-then-rolled-back under
+    Section 5.2's two-phase protocol, correctly retaining the old path --
+    but that old path is exactly the one the just-failed repair was
+    trying to replace, so it still does not avoid the fault) -- attempts a
+    fresh repair, recomputing the BFS path against the current
+    `down_edges` rather than reusing whichever attempt failed. Returns
     (new_current_path, event_name, event_fields) exactly like
-    `execute_repair()`, or `(current_path, None, None)` if no retry was
-    needed (`current_path` is not `None`).
+    `execute_repair()`, or `(current_path, None, None)` if no retry is
+    needed (`current_path` is known and avoids every down edge).
 
     This closes a real liveness gap found by review: `decide_link_event()`
     only starts a repair on a `state=="down"` event for an edge `not in
@@ -382,29 +606,37 @@ def maybe_retry_repair(current_path, down_edges):
     first processed), so a *duplicate* transition on the same edge, or no
     further transition at all (the physical link stays down and nothing
     about it changes again), would never re-trigger a repair attempt
-    through the event-driven path alone. `current_path=None` becoming a
-    permanent dead end -- rather than "not yet fixed" -- would mean a
-    transient flow-installation failure (a remote OVS instance briefly
-    unreachable, a timeout) could leave the agent silently blind
-    indefinitely, with no further action, even after the underlying
-    problem clears. Called from `main()`'s periodic `poll_interval` tick
-    (the same wake-up source `reconcile_expired_holddowns()` already uses),
-    not from the OVSDB event branch, since this must keep trying with no
-    event required to trigger it. If BFS finds no path at all avoiding
-    `down_edges` (the edge is genuinely unreachable another way, not a
-    flow-installation problem), this reports `repair_retry_no_path` rather
-    than retrying pointlessly every tick. There is no bounded retry count
-    or give-up threshold -- retries continue at the existing tick interval
-    for as long as `current_path` stays `None`, an explicit, disclosed
+    through the event-driven path alone. A retained-but-still-faulty
+    `current_path` becoming a permanent dead end -- rather than "not yet
+    fixed" -- would mean a transient flow-installation failure (a remote
+    OVS instance briefly unreachable, a timeout) could leave the agent
+    silently stuck indefinitely, with no further action, even after the
+    underlying problem clears. Called from `main()`'s periodic
+    `poll_interval` tick (the same wake-up source
+    `reconcile_expired_holddowns()` already uses), not from the OVSDB event
+    branch, since this must keep trying with no event required to trigger
+    it. If BFS finds no path at all avoiding `down_edges` (the edge is
+    genuinely unreachable another way, not a flow-installation problem),
+    this reports `repair_retry_no_path` rather than retrying pointlessly
+    every tick. There is no bounded retry count or give-up threshold --
+    retries continue at the existing tick interval for as long as
+    `current_path` stays unknown or faulty, an explicit, disclosed
     limitation (a permanently unreachable remote OVS instance would retry
     forever) rather than a designed backoff/circuit-breaker policy."""
-    if current_path is not None:
+    if current_path is not None and not _path_uses_down_edge(current_path, down_edges):
         return current_path, None, None
     retry_path = bfs_path(SOURCE, DEST, down_edges)
     if retry_path is None:
         return current_path, "repair_retry_no_path", {
             "down_edges": [list(edge) for edge in down_edges],
         }
+    if retry_path == current_path:
+        # Cannot actually happen: BFS never returns a path that traverses
+        # down_edges, so it can never equal a current_path this function
+        # has just determined DOES traverse one. Kept as a defensive
+        # no-op guard, matching decide_link_event()'s own no-op check,
+        # rather than assumed unreachable.
+        return current_path, None, None
     return execute_repair({"action": "repair", "new_path": retry_path}, current_path)
 
 
@@ -427,6 +659,52 @@ def _edge_confirmed_up(edge, interface_state):
     drive the second interface at all, still behave correctly here."""
     interfaces = EDGE_INTERFACES.get(edge, frozenset())
     return all(interface_state.get(name, "up") == "up" for name in interfaces)
+
+
+def resync_from_reconnect(snapshot, down_edges, interface_state):
+    """Reconciles state after one OVSDB target's monitor connection
+    reconnects (see `monitor_link_rows()`) and a fresh initial snapshot is
+    available -- the runtime counterpart of the startup-state-sync fix
+    (Section 4.4): the `ovsdb-client monitor` child for one endpoint can die
+    while the agent's own process keeps running (a crash, a dropped OVSDB
+    connection), and any link-state transition that happened while
+    disconnected is invisible until this fresh snapshot is read. Mutates
+    `interface_state`/`down_edges` in place, like
+    `reconcile_expired_holddowns()` and `decide_link_event()` do, so all
+    three share the same state-mutation contract.
+
+    Only interfaces present in `snapshot`, that are also in
+    `MONITORED_INTERFACES`, with a value of exactly `"up"` or `"down"`, are
+    applied; anything else is skipped, not treated as implicitly up --
+    matching `down_edges_from_snapshot()`'s startup validation, but does
+    NOT raise: an unrecognised `link_state` from a live server after
+    reconnect is a reason to skip that one interface's update, not to
+    crash an already-running agent (unlike the startup case, where the
+    process has not begun serving anything yet). Does not touch hold-down
+    timers -- reconnect is about regaining observability, not about repair
+    timing; any hold-down already in progress continues on its existing
+    schedule unaffected.
+
+    Returns the list of `(name, state)` pairs skipped for an unrecognised
+    `link_state`, for the caller to log."""
+    invalid = []
+    for name, state in snapshot.items():
+        if name not in MONITORED_INTERFACES:
+            continue
+        if state not in ("up", "down"):
+            invalid.append((name, state))
+            continue
+        interface_state[name] = state
+    for name in snapshot:
+        if name not in MONITORED_INTERFACES:
+            continue
+        switch, neighbor = MONITORED_INTERFACES[name]
+        edge = frozenset({switch, neighbor})
+        if _edge_confirmed_up(edge, interface_state):
+            down_edges.discard(edge)
+        elif interface_state.get(name) == "down":
+            down_edges.add(edge)
+    return invalid
 
 
 def reconcile_expired_holddowns(held_down_until, interface_state, down_edges, now):
@@ -454,14 +732,35 @@ def reconcile_expired_holddowns(held_down_until, interface_state, down_edges, no
 
 
 def decide_link_event(name, state, down_edges, held_down_until,
-                       interface_state, current_path, now,
-                       hold_down_seconds=HOLD_DOWN_SECONDS):
+                       interface_state, current_path, now):
     """Pure decision function for one OVSDB link-state event on a monitored
     interface: IDLE/ACTIVE/HELD-DOWN state machine plus the existing BFS
-    repair decision. Mutates down_edges/held_down_until/interface_state
-    in place (the agent's state); does no I/O and calls no subprocess, so
-    this is exercised directly by a synthetic event sequence and a fake
-    clock in test_daim_link_agent.py without OVSDB, OVS, or Mininet.
+    repair decision. Mutates down_edges/interface_state in place (the
+    agent's state); does no I/O and calls no subprocess, so this is
+    exercised directly by a synthetic event sequence and a fake clock in
+    test_daim_link_agent.py without OVSDB, OVS, or Mininet. It reads
+    `held_down_until` (to check suppression) but no longer writes to it: a
+    "repair" decision does not itself start a hold-down window (see the
+    "Timing precision" note below) -- `held_down_until` is mutated only by
+    `reconcile_expired_holddowns()` (expiry) and by the caller (a new
+    window, once a repair actually commits).
+
+    Timing precision (Section 5.2/Section 4.7): an earlier revision set
+    `held_down_until[edge]` inside this function, at the moment the
+    "repair" decision was made -- before the caller performed any of the
+    withdrawal/install I/O that decision triggers. Since that I/O takes on
+    the order of 150-180 ms (Table 2), the hold-down window's clock started
+    running for roughly that long before the repair it was meant to cover
+    had actually completed, and if the flow-install call failed partway
+    through, the window would already be running regardless of whether
+    anything was actually installed. The window is now started by the
+    caller instead, only once `execute_repair()` reports the new path was
+    actually committed (`repair_installed` or `repair_installed_stale_withdraw`,
+    Section 5.2) -- tying "hold-down started" to "repair complete" rather
+    than to "repair decided", and giving a failed-and-rolled-back repair
+    (which retains the old path untouched, Section 5.2) no window at all,
+    since nothing about the forwarding state actually changed for that
+    attempt.
 
     Hold-down state is keyed by *edge* (the frozenset of the two switches a
     link connects), not by interface name. A physical link corresponds to
@@ -514,7 +813,6 @@ def decide_link_event(name, state, down_edges, held_down_until,
                      "reason": "no alternate path avoiding down edges"}
         if new_path == current_path:
             return {"action": "noop", "interface": name}
-        held_down_until[edge] = now + hold_down_seconds
         return {"action": "repair", "interface": name, "edge": [switch, neighbor],
                 "old_path": current_path, "new_path": new_path}
 
@@ -632,17 +930,22 @@ def read_initial_snapshot(proc, timeout=10.0):
     return {name: state for name, state in rows if name in MONITORED_INTERFACES}
 
 
-def monitor_link_rows(procs, poll_interval=None):
+RECONNECT_EVENT = "__monitor_reconnect__"
+
+
+def monitor_link_rows(procs_by_target, poll_interval=None):
     """Yields (name, link_state) for every real 'new' row pushed by any of
     the given *already-started* monitor subprocesses (see _start_monitor/
     read_initial_snapshot, which must run first for each so the initial
     snapshot this generator does not handle is not lost), multiplexed via
-    `select()` across however many there are. A multi-OVS deployment opens
-    one connection per distinct OVSDB endpoint its MONITORED_INTERFACES
-    span (Section 8.3's connection-multiplexing requirement) and passes all
-    of them here as a list; the default single-endpoint configuration
-    passes a list of exactly one, and this behaves identically to watching
-    that one connection as before.
+    `select()` across however many there are. `procs_by_target` maps each
+    OVSDB target (`None` for the local connection, matching every other
+    target-keyed structure in this file) to its already-started Popen. A
+    multi-OVS deployment opens one connection per distinct OVSDB endpoint
+    its MONITORED_INTERFACES span (Section 8.3's connection-multiplexing
+    requirement); the default single-endpoint configuration passes a dict
+    of exactly one entry (`{None: proc}`), and this behaves identically to
+    watching that one connection as before.
 
     If `poll_interval` is given, also yields `None` at least every
     `poll_interval` seconds when no OVSDB event has arrived on *any*
@@ -652,9 +955,30 @@ def monitor_link_rows(procs, poll_interval=None):
     exist only so main() can call reconcile_expired_holddowns() on a
     bounded schedule even when an interface's hold-down window expires with
     no further event ever seen for it (see reconcile_expired_holddowns'
-    docstring for why that case needs a wake-up source at all)."""
+    docstring for why that case needs a wake-up source at all).
+
+    Reconnect: when a stream closes (EOF -- the `ovsdb-client monitor`
+    child died: a crash, a dropped OVSDB connection, not a normal
+    condition), an earlier revision just silently dropped that connection
+    from the poll set and kept going, permanently blind to that target from
+    then on -- a real reliability gap: the same problem the startup-state
+    fix (Section 4.4) closed for a fresh agent process, left open for the
+    rest of a long-running one. This now attempts exactly one immediate
+    reconnect for that target: spawns a fresh monitor child
+    (`_start_monitor(target)`) and reads its initial snapshot
+    (`read_initial_snapshot()`). On success, yields `(RECONNECT_EVENT,
+    target, snapshot)` so the caller can reconcile state
+    (`resync_from_reconnect()`) and swaps the new child's stream into the
+    active set so it keeps yielding future events normally. On failure (the
+    respawn itself fails, or no initial snapshot arrives within
+    `read_initial_snapshot`'s timeout), yields `(RECONNECT_EVENT, target,
+    None)` and that target's connection is not retried again by this
+    function -- an explicit, disclosed limitation: reconnect is attempted
+    once per disconnection, not retried indefinitely the way
+    `maybe_retry_repair()` retries a failed repair."""
     import select
-    streams = [p.stdout for p in procs]
+    stream_targets = {p.stdout: t for t, p in procs_by_target.items()}
+    streams = list(stream_targets)
     while streams:
         ready, _, _ = select.select(streams, [], [], poll_interval)
         if not ready:
@@ -663,7 +987,17 @@ def monitor_link_rows(procs, poll_interval=None):
         for stream in ready:
             line = stream.readline()
             if not line:
+                target = stream_targets.pop(stream)
                 streams.remove(stream)
+                try:
+                    new_proc = _start_monitor(target)
+                    snapshot = read_initial_snapshot(new_proc)
+                except Exception:
+                    yield (RECONNECT_EVENT, target, None)
+                    continue
+                stream_targets[new_proc.stdout] = target
+                streams.append(new_proc.stdout)
+                yield (RECONNECT_EVENT, target, snapshot)
                 continue
             for name, state in _parse_monitor_line(line):
                 yield name, state
@@ -699,7 +1033,7 @@ def down_edges_from_snapshot(snapshot):
 
 def main():
     targets = _monitored_ovsdb_targets()
-    procs = [_start_monitor(target) for target in targets]
+    procs_by_target = {target: _start_monitor(target) for target in targets}
     if len(targets) > 1:
         log("multi_ovs_connections_opened", targets=[t or "local" for t in targets])
     # Every exit from this block -- a normal sys.exit(1) on a fatal startup
@@ -712,7 +1046,7 @@ def main():
     # deployment can have more than one such child open at once.
     try:
         initial = {}
-        for proc in procs:
+        for proc in procs_by_target.values():
             initial.update(read_initial_snapshot(proc))
         missing = [name for name in MONITORED_INTERFACES if name not in initial]
         if missing:
@@ -731,7 +1065,7 @@ def main():
         current_path, event_name, event_fields = execute_startup_install(current_path, down_edges)
         log(event_name, **event_fields)
     except BaseException:
-        for proc in procs:
+        for proc in procs_by_target.values():
             if proc.poll() is None:
                 proc.terminate()
                 try:
@@ -742,10 +1076,11 @@ def main():
 
     held_down_until = {}
 
-    # poll_interval only drives reconcile_expired_holddowns() wake-ups
-    # (see that function's docstring); it is well under HOLD_DOWN_SECONDS so
+    # poll_interval drives reconcile_expired_holddowns() and
+    # maybe_retry_repair() wake-ups (see each function's docstring); it is
+    # well under HOLD_DOWN_SECONDS so
     # an expired window is reconciled promptly even with no further event.
-    for event in monitor_link_rows(procs, poll_interval=HOLD_DOWN_SECONDS / 4):
+    for event in monitor_link_rows(procs_by_target, poll_interval=HOLD_DOWN_SECONDS / 4):
         if event is None:
             recovered = reconcile_expired_holddowns(
                 held_down_until, interface_state, down_edges, time.monotonic(),
@@ -755,6 +1090,27 @@ def main():
             current_path, event_name, event_fields = maybe_retry_repair(current_path, down_edges)
             if event_name is not None:
                 log(event_name, **event_fields)
+            continue
+
+        if event[0] == RECONNECT_EVENT:
+            _, target, snapshot = event
+            if snapshot is None:
+                log("monitor_reconnect_failed", target=target or "local")
+                continue
+            invalid = resync_from_reconnect(snapshot, down_edges, interface_state)
+            for bad_name, bad_state in invalid:
+                log("invalid_link_state", interface=bad_name, state=bad_state)
+            log("monitor_reconnected", target=target or "local", interfaces=sorted(snapshot))
+            new_path = bfs_path(SOURCE, DEST, down_edges)
+            if new_path != current_path:
+                if new_path is None:
+                    log("repair_failed",
+                        reason="no alternate path avoiding down edges (post-reconnect resync)")
+                else:
+                    current_path, event_name, event_fields = execute_repair(
+                        {"action": "repair", "new_path": new_path}, current_path,
+                    )
+                    log(event_name, **event_fields)
             continue
 
         name, state = event
@@ -776,6 +1132,15 @@ def main():
         elif action == "repair":
             log("link_down_detected", interface=name, edge=decision["edge"], ns=detected_ns)
             current_path, event_name, event_fields = execute_repair(decision, current_path)
+            # Start the hold-down window only now, once the repair is
+            # confirmed to have actually committed the new path (Section
+            # 5.2/4.7's timing-precision fix) -- not at decision time,
+            # before the withdrawal/install I/O above ran. A repair that
+            # failed and rolled back (current_path still the old path,
+            # decision["new_path"] not reached) gets no window at all,
+            # since forwarding state did not actually change.
+            if current_path == decision["new_path"]:
+                held_down_until[frozenset(decision["edge"])] = time.monotonic() + HOLD_DOWN_SECONDS
             log(event_name, **event_fields)
         elif action == "recovered":
             log("link_up_detected", interface=name)

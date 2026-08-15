@@ -6,10 +6,11 @@ authors:
   - family-names: Banjar
     given-names: Ameen
     orcid: "https://orcid.org/0000-0002-0871-5153"
-version: 0.11.0
+version: 0.12.0
 date-released: 2026-08-15
 license: Apache-2.0
-doi: 10.5281/zenodo.21945308
+# doi: TODO -- fill in the v0.12.0 version-specific DOI once this tag's
+# release is minted by Zenodo. v0.11.0 DOI: 10.5281/zenodo.21945308.
 # v0.10.0 DOI: 10.5281/zenodo.21940583. v0.9.0 DOI: 10.5281/zenodo.21940478.
 # v0.8.0 DOI: 10.5281/zenodo.21939224. v0.7.0 DOI: 10.5281/zenodo.21924978.
 # v0.6.0 DOI: 10.5281/zenodo.21918394. v0.5.0 DOI: 10.5281/zenodo.21912414.
@@ -119,13 +120,52 @@ abstract: >-
   cookie-scoping fix changes the wire-level flow-mod strings sent on every
   call, so the n=5 multi-OVS measurement was re-run again: still 5/5
   clean, mean repair-action time 203.54 ms (up from 191.48 ms
-  pre-cookie-scoping). Contains pure-logic
+  pre-cookie-scoping). v0.12.0 closes four further evidence-gate items from
+  a fifth review pass. AGENT_COOKIE, a single fixed constant correct only
+  for a single-agent deployment, is replaced by _agent_cookie(), derived
+  deterministically per (SOURCE, DEST) pair, so two agents protecting
+  different pairs on a shared switch no longer collide. The repair-action
+  time metric definition (manuscript Section 6.3) is corrected -- the timer
+  starts inside execute_repair(), after decide_link_event()'s own BFS has
+  already run, not from the start of BFS recomputation as previously
+  stated; a wording fix, no numbers changed. monitor_link_rows() now
+  attempts one reconnect on a dead ovsdb-client monitor stream, reconciling
+  state via resync_from_reconnect() and triggering a real repair if the
+  resync reveals the installed path no longer avoids every down edge --
+  verified live by killing a real remote monitor connection and confirming
+  both a clean reconnect and continued correct detection/repair afterward.
+  install_path() gained a forwarding-consistency pre-check
+  (_conflicting_flow_cookie(), a read-only ovs-ofctl dump-flows query
+  outside the adapter): a foreign-cookie flow already occupying the exact
+  match a new install would use is now rejected rather than silently
+  overwritten, verified live against a real conflicting flow. Most
+  substantially, execute_repair() now implements a two-phase prepare/commit
+  protocol -- the new path is staged before the old path is withdrawn, and
+  a staging failure rolls back to the untouched old path rather than
+  degrading to current_path=None. Implementing this the naive way (deleting
+  by OpenFlow match at commit and rollback) turned out to be unsafe: the
+  switch attached to SOURCE and the switch attached to DEST each have one
+  flow whose match is identical across every alternate path, so a naive
+  delete removed the live, just-staged entry outright rather than leaving
+  or restoring it -- confirmed live as a real blackhole in an otherwise
+  cleanly-reported repair, fixed by _withdraw_stale_path() and
+  _rollback_staged_path(), which skip or restore that colliding match
+  instead of deleting it, re-verified against the same live fault injection
+  that found the bug. The hold-down window's start moved out of
+  decide_link_event() (which set it at decision time, before any I/O ran)
+  into main(), gated on execute_repair() reporting an actual commit,
+  re-verified live by observing correct suppression of the same physical
+  link's other interface reporting the identical fault moments later.
+  Contains pure-logic
   unit tests for the path computation and all hold-down/startup behaviours
   (suppression, stale-state reconciliation, cross-interface coverage,
   edge-confirmation, startup synchronization, link_state validation at both
   startup and runtime, multi-OVS target routing, adapter unification,
   partial-failure honesty, endpoint genericity, cookie-scoped deletion,
-  startup-install honesty, repair-retry liveness), all
+  startup-install honesty, repair-retry liveness, pair-scoped-cookie
+  determinism, monitor-subprocess reconnect, forwarding-consistency
+  rejection, and two-phase rollback with boundary-hop-collision handling),
+  all
   runnable without Mininet/OVS; live-network flapping-link,
   startup-already-down, and multi-OVS-deployment scripts and their raw data
   and event logs across every pre-fix and post-fix run, retained side by
