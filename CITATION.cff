@@ -6,10 +6,11 @@ authors:
   - family-names: Banjar
     given-names: Ameen
     orcid: "https://orcid.org/0000-0002-0871-5153"
-version: 0.14.0
+version: 0.15.0
 date-released: 2026-08-15
 license: Apache-2.0
-doi: 10.5281/zenodo.21953875
+# doi: TODO -- fill in the v0.15.0 version-specific DOI once this tag's
+# release is minted by Zenodo. v0.14.0 DOI: 10.5281/zenodo.21953875.
 # v0.13.0 DOI: 10.5281/zenodo.21951662.
 # v0.12.0 DOI: 10.5281/zenodo.21949036.
 # v0.11.0 DOI: 10.5281/zenodo.21945308.
@@ -200,7 +201,16 @@ abstract: >-
   back directly and resolving True/False only once confirmed, raising
   rather than guessing if even the read-back cannot tell; live-verified
   only as a regression check on the ordinary path, since no measured
-  repetition has ever actually timed out), all
+  repetition has ever actually timed out; and service-restoration
+  decomposition instrumentation (v0.15.0, the first Layer-2 evaluation
+  step, deliberately landed before further live experiments so the final
+  timing dataset is collected once against fully instrumented code):
+  bfs_start_ns/bfs_end_ns bracketing every bfs_path() call site,
+  stage_start_ns/stage_end_ns and commit_start_ns/commit_end_ns in
+  execute_repair(), all copied into the logged event without changing
+  repair_start_ns/repair_end_ns's pre-existing meaning -- live-verified
+  against the multi-OVS testbed, confirming an internally consistent
+  BFS/stage/commit breakdown on a real fault injection), all
   runnable without Mininet/OVS; live-network flapping-link,
   startup-already-down, and multi-OVS-deployment scripts and their raw data
   and event logs across every pre-fix and post-fix run, retained side by

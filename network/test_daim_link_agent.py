@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pure-logic unit tests for daim_link_agent, independent of Mininet/OVS/OVSDB.
 
-Thirty-one things are checked without a live network:
+Thirty-three things are checked without a live network:
 1. `test_bfs_path_computation` -- the BFS-computed primary and alternate
    paths produce exactly the flow sets that were previously hand-written in
    stage3_link_recovery.py's install_primary()/install_alternate(), so the
@@ -203,7 +203,22 @@ Thirty-one things are checked without a live network:
     `_apply_flow_or_fail_safe()`, what every caller of `apply_flow()` in
     this file actually uses, converts an unresolved ambiguous outcome into
     a plain `False` rather than letting `_ForwardingCheckError` propagate
-    to callers that only handle a boolean result."""
+    to callers that only handle a boolean result.
+32. `test_decide_link_event_includes_bfs_timing` -- a `"repair"` or
+    `"repair_failed"` decision must include `bfs_start_ns`/`bfs_end_ns`
+    bracketing the real `bfs_path()` call (Section 10's
+    service-restoration decomposition), using `time.perf_counter_ns()`,
+    distinct from the synthetic `now` this function's own state machine
+    uses for hold-down timing.
+33. `test_execute_repair_includes_decomposed_timing` -- `execute_repair()`'s
+    returned `event_fields` must include `stage_start_ns`/`stage_end_ns`
+    bracketing `install_path()` in every outcome, `commit_start_ns`/
+    `commit_end_ns` bracketing `_withdraw_stale_path()` only when a commit
+    actually ran, and the decision's own `bfs_start_ns`/`bfs_end_ns`
+    copied through unchanged when present (and simply omitted, not
+    crashing, when absent) -- while `repair_start_ns`/`repair_end_ns` keep
+    their pre-existing meaning, so no previously-reported timing number's
+    definition changes."""
 import json
 import os
 
@@ -1102,6 +1117,112 @@ def test_execute_repair_reports_partial_failure_honestly():
           "still advances current_path but under a distinct stale-withdraw "
           "event; and a None prior path does not crash a subsequent repair "
           "attempt.")
+
+
+def test_decide_link_event_includes_bfs_timing():
+    """decide_link_event()'s "repair" and "repair_failed" decisions must
+    include bfs_start_ns/bfs_end_ns bracketing the bfs_path() call
+    (Section 10's service-restoration decomposition), with
+    bfs_end_ns >= bfs_start_ns, using the real time.perf_counter_ns()
+    clock -- distinct from the synthetic `now` this function's own state
+    machine uses -- so a caller can reconstruct BFS cost as a phase
+    separate from repair-action time (Section 6.3: repair_start_ns marks
+    the start of staging, AFTER this BFS call has already run, so BFS
+    cost was never actually inside that window)."""
+    down_edges = set()
+    held_down_until, interface_state = {}, {}
+    current_path = ["s1", "s2", "s4"]
+
+    d1 = decide_link_event(
+        INTERFACE, "down", down_edges, held_down_until,
+        interface_state, current_path, 0.0,
+    )
+    assert d1["action"] == "repair", d1
+    assert "bfs_start_ns" in d1 and "bfs_end_ns" in d1
+    assert d1["bfs_end_ns"] >= d1["bfs_start_ns"]
+
+    # repair_failed (no alternate path) must also carry BFS timing. The
+    # OTHER path (s1-s3-s4) is already down; triggering "down" on the
+    # monitored s1-eth2 interface (edge s1-s2, not already in down_edges)
+    # leaves no path avoiding both, so BFS itself fails.
+    down_edges2 = {frozenset({"s1", "s3"})}
+    held_down_until2, interface_state2 = {}, {}
+    d2 = decide_link_event(
+        "s1-eth2", "down", down_edges2, held_down_until2,
+        interface_state2, ["s1", "s2", "s4"], 0.0,
+    )
+    assert d2["action"] == "repair_failed", d2
+    assert "bfs_start_ns" in d2 and "bfs_end_ns" in d2
+    assert d2["bfs_end_ns"] >= d2["bfs_start_ns"]
+
+    print("daim_link_agent decide_link_event BFS-timing regression test: "
+          "PASS -- both a successful repair decision and a repair_failed "
+          "decision include bfs_start_ns/bfs_end_ns bracketing the real "
+          "BFS call.")
+
+
+def test_execute_repair_includes_decomposed_timing():
+    """execute_repair()'s returned event_fields must include the full
+    service-restoration decomposition (Section 10): stage_start_ns/
+    stage_end_ns bracketing install_path() in every outcome,
+    commit_start_ns/commit_end_ns bracketing _withdraw_stale_path() when
+    a commit actually runs, and the decision's own bfs_start_ns/bfs_end_ns
+    (if present) copied through unchanged -- so a single logged event
+    carries detection-to-restoration as distinct phases (BFS, staging,
+    commit) rather than one opaque repair_start_ns-to-repair_end_ns span.
+    repair_start_ns/repair_end_ns keep their pre-existing meaning
+    (identical to stage_start_ns, and the overall end respectively) so no
+    previously-reported number's definition changes."""
+    saved_apply_flow = daim_link_agent.apply_flow
+    saved_check = daim_link_agent._conflicting_flow_cookie
+    old_path = ["s1", "s2", "s4"]
+    new_path = ["s1", "s3", "s4"]
+    decision = {
+        "action": "repair", "new_path": new_path,
+        "bfs_start_ns": 1000, "bfs_end_ns": 1500,
+    }
+    try:
+        daim_link_agent._conflicting_flow_cookie = lambda bridge, flow: None
+
+        # Clean success: staging AND commit both ran, both bracketed, and
+        # the decision's BFS timing is copied through unchanged.
+        daim_link_agent.apply_flow = lambda action, bridge, arg: True
+        result_path, event_name, fields = execute_repair(decision, old_path)
+        assert event_name == "repair_installed"
+        assert fields["bfs_start_ns"] == 1000 and fields["bfs_end_ns"] == 1500
+        assert fields["repair_start_ns"] == fields["stage_start_ns"]
+        assert fields["stage_end_ns"] >= fields["stage_start_ns"]
+        assert fields["commit_start_ns"] >= fields["stage_end_ns"]
+        assert fields["commit_end_ns"] >= fields["commit_start_ns"]
+        assert fields["repair_end_ns"] == fields["commit_end_ns"]
+
+        # A decision with no BFS timing at all (e.g. a hand-built decision
+        # in a test, or a future caller that doesn't compute one) must not
+        # crash and must simply omit the bfs_*_ns keys.
+        no_bfs_decision = {"action": "repair", "new_path": new_path}
+        _, event_name, fields = execute_repair(no_bfs_decision, old_path)
+        assert event_name == "repair_installed"
+        assert "bfs_start_ns" not in fields and "bfs_end_ns" not in fields
+
+        # Staging failure: stage_start_ns/stage_end_ns still present, no
+        # commit_*_ns (commit never ran).
+        def failing_install(action, bridge, arg):
+            return not (action == "add" and bridge == "s3")
+        daim_link_agent.apply_flow = failing_install
+        _, event_name, fields = execute_repair(decision, old_path)
+        assert event_name == "repair_incomplete"
+        assert fields["bfs_start_ns"] == 1000 and fields["bfs_end_ns"] == 1500
+        assert fields["stage_end_ns"] >= fields["stage_start_ns"]
+        assert "commit_start_ns" not in fields
+    finally:
+        daim_link_agent.apply_flow = saved_apply_flow
+        daim_link_agent._conflicting_flow_cookie = saved_check
+
+    print("daim_link_agent execute_repair decomposed-timing regression "
+          "test: PASS -- stage_*_ns and commit_*_ns bracket their own "
+          "phases correctly, the decision's own bfs_*_ns is copied through "
+          "unchanged when present and simply omitted when not, and "
+          "repair_start_ns/repair_end_ns keep their pre-existing meaning.")
 
 
 def test_withdraw_stale_path_skips_boundary_hop_collisions():
@@ -2050,6 +2171,8 @@ def main():
     test_apply_flow_resolves_ambiguous_timeout_via_readback()
     test_apply_flow_or_fail_safe_treats_unresolved_ambiguity_as_failure()
     test_execute_repair_reports_partial_failure_honestly()
+    test_decide_link_event_includes_bfs_timing()
+    test_execute_repair_includes_decomposed_timing()
     test_withdraw_stale_path_skips_boundary_hop_collisions()
     test_rollback_staged_flows_restores_boundary_hop_collisions()
     test_rollback_staged_flows_ignores_never_staged_matches()

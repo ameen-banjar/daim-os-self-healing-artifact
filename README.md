@@ -57,7 +57,7 @@ uses them.
   performs the actual OVSDB/adapter I/O. Hold-down state is keyed by physical
   edge (the frozenset of the two switches a link connects), not by interface
   name, since v0.3.0 (see below).
-- `network/test_daim_link_agent.py` — thirty-one pure-logic unit tests, runnable
+- `network/test_daim_link_agent.py` — thirty-three pure-logic unit tests, runnable
   with plain `python3` and no Mininet/OVS/OVSDB: (1) BFS path computation
   against hand-verified expected flow sets; (2) the hold-down state machine
   driven through a synthetic seven-transition flapping-link sequence, with
@@ -118,8 +118,13 @@ uses them.
   reading the switch's actual state back directly, rather than treating
   the timeout as a confirmed failure; (31) confirming
   `_apply_flow_or_fail_safe()` converts an unresolved ambiguous outcome
-  into a plain failure rather than an uncaught exception (v0.14.0, see
-  below).
+  into a plain failure rather than an uncaught exception (v0.14.0); (32)
+  confirming `decide_link_event()`'s `"repair"`/`"repair_failed"`
+  decisions include `bfs_start_ns`/`bfs_end_ns` bracketing the real BFS
+  call; (33) confirming `execute_repair()`'s returned fields include
+  `stage_*_ns`/`commit_*_ns` bracketing their own phases in every
+  outcome, with the decision's own BFS timing copied through when present
+  (v0.15.0, see below).
 - `network/test_stage3_startup_already_down.py` — a regression test for a
   bug in the startup live-network harness itself (v0.6.0, see below), kept
   separate from `test_daim_link_agent.py` since it tests the harness, not
@@ -162,6 +167,52 @@ uses them.
   `analysis/paper3_analysis.py` from the real raw data and the real output of
   the hold-down unit test (nothing in these figures is hand-drawn or
   invented; re-run the script to regenerate them from source).
+
+## Service-restoration decomposition instrumentation (v0.15.0)
+
+The first step of this evidence set's move from correctness-debugging (Layer 1, v0.3.0-v0.14.0) to
+evaluation breadth (Layer 2): with the reviewer's own explicit reasoning that this instrumentation
+should land BEFORE any further live experiments, so the eventual final timing dataset is collected
+once against fully-instrumented code rather than repeated after every addition.
+
+Every repair-related log line now carries a full phase breakdown instead of one opaque start/end
+span. Whichever function computes the BFS path -- `decide_link_event()`, `maybe_retry_repair()`, or
+`main()`'s post-reconnect resync branch -- now brackets its own `bfs_path()` call with
+`bfs_start_ns`/`bfs_end_ns` and passes the pair through in the repair decision it constructs.
+`execute_repair()` copies that pair into its own returned event fields unchanged when present
+(simply omitted, not crashing, when a decision has none), alongside two new phase pairs of its own:
+`stage_start_ns`/`stage_end_ns` bracketing `install_path()`, and `commit_start_ns`/`commit_end_ns`
+bracketing `_withdraw_stale_path()` (present only in outcomes where a commit actually runs). The
+pre-existing `repair_start_ns`/`repair_end_ns` fields keep their exact prior meaning -- identical to
+`stage_start_ns`, and the overall end of the whole operation, respectively -- so no previously
+reported timing number's definition changes; this only makes phases that were always implicitly
+present separately observable.
+
+Live-verified against the multi-OVS testbed: a real fault injection produced a `repair_installed` log
+line with an internally consistent BFS/stage/commit breakdown --
+
+```
+{"event": "repair_installed", "path": ["s3", "s5", "s4"],
+ "repair_start_ns": ..., "repair_end_ns": ...,
+ "stage_start_ns": ..., "stage_end_ns": ...,
+ "commit_start_ns": ..., "commit_end_ns": ...,
+ "bfs_start_ns": ..., "bfs_end_ns": ..., "held_down_seconds": 2.0}
+```
+
+-- with BFS on the order of 10 microseconds for the tested topology, well under the <0.3 ms bound
+already cited for a 200-node graph, confirming rather than revising that earlier estimate.
+
+This closes the instrumentation half of the service-restoration-decomposition evidence-gate item, not
+the dataset half: replacing the single repair-action figure/table with the decomposed timeline this
+now makes possible, and correlating it against the first successful post-failure packet observed
+independently by the probe traffic, remain open -- the latter needs the experiment harness scripts
+themselves updated to capture per-packet probe timestamps and a shared clock reference against the
+agent's own `perf_counter_ns()` timeline, not yet done.
+
+New unit tests: `decide_link_event()`'s BFS timing on both a successful repair decision and a
+`repair_failed` decision; `execute_repair()`'s phase-bracketing across every outcome (clean success,
+staging failure, commit failure), including that a decision with no BFS timing at all does not crash
+and simply omits those keys. 33/33 tests pass (2 new).
 
 ## Ambiguous Flow-Mod outcomes resolved by read-back (v0.14.0)
 

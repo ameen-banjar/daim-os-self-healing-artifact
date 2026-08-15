@@ -687,38 +687,64 @@ def execute_repair(decision, current_path):
     a clean `repair_installed`, since the old path's flows are left behind
     as uncleaned, stale leftovers rather than a forwarding problem.
 
+    Service-restoration decomposition (Section 10): every returned
+    `event_fields` includes `stage_start_ns`/`stage_end_ns` (bracketing
+    `install_path()`) alongside the pre-existing `repair_start_ns`
+    (identical to `stage_start_ns`) and `repair_end_ns` (the overall end,
+    unchanged in meaning from before this decomposition was added -- no
+    previously-reported "repair-action time" number changes). A commit
+    that actually ran (i.e. staging succeeded) also includes
+    `commit_start_ns`/`commit_end_ns` bracketing `_withdraw_stale_path()`.
+    `decision`'s own `bfs_start_ns`/`bfs_end_ns` (set by whichever caller
+    computed `new_path` -- `decide_link_event()`, `maybe_retry_repair()`,
+    or `main()`'s post-reconnect resync branch), if present, are copied
+    through unchanged, so a single log line carries the whole
+    detection-to-restoration timeline: BFS, staging, and commit as
+    distinct phases rather than one opaque span.
+
     Returns (new_current_path, event_name, event_fields) for the caller to
     log."""
     new_path = decision["new_path"]
+    bfs_start_ns = decision.get("bfs_start_ns")
+    bfs_end_ns = decision.get("bfs_end_ns")
     repair_start_ns = time.perf_counter_ns()
+    stage_start_ns = repair_start_ns
     install_ok, staged = install_path(new_path, old_path=current_path)
+    stage_end_ns = time.perf_counter_ns()
     if not install_ok:
         rollback_ok = _rollback_staged_flows(staged, current_path)
         repair_end_ns = time.perf_counter_ns()
-        if not rollback_ok:
-            return None, "repair_rollback_incomplete", {
-                "attempted_path": new_path, "prior_path": current_path,
-                "install_ok": False, "rollback_ok": False,
-                "repair_start_ns": repair_start_ns, "repair_end_ns": repair_end_ns,
-            }
-        return current_path, "repair_incomplete", {
+        fields = {
             "attempted_path": new_path, "prior_path": current_path,
             "install_ok": False,
             "repair_start_ns": repair_start_ns, "repair_end_ns": repair_end_ns,
+            "stage_start_ns": stage_start_ns, "stage_end_ns": stage_end_ns,
         }
+        if bfs_start_ns is not None:
+            fields["bfs_start_ns"] = bfs_start_ns
+            fields["bfs_end_ns"] = bfs_end_ns
+        if not rollback_ok:
+            fields["rollback_ok"] = False
+            return None, "repair_rollback_incomplete", fields
+        return current_path, "repair_incomplete", fields
+    commit_start_ns = time.perf_counter_ns()
     withdraw_ok = True if current_path is None else _withdraw_stale_path(current_path, new_path)
-    repair_end_ns = time.perf_counter_ns()
-    if withdraw_ok:
-        return new_path, "repair_installed", {
-            "path": new_path,
-            "repair_start_ns": repair_start_ns, "repair_end_ns": repair_end_ns,
-            "held_down_seconds": HOLD_DOWN_SECONDS,
-        }
-    return new_path, "repair_installed_stale_withdraw", {
-        "path": new_path, "stale_path": current_path,
+    commit_end_ns = time.perf_counter_ns()
+    repair_end_ns = commit_end_ns
+    fields = {
+        "path": new_path,
         "repair_start_ns": repair_start_ns, "repair_end_ns": repair_end_ns,
+        "stage_start_ns": stage_start_ns, "stage_end_ns": stage_end_ns,
+        "commit_start_ns": commit_start_ns, "commit_end_ns": commit_end_ns,
         "held_down_seconds": HOLD_DOWN_SECONDS,
     }
+    if bfs_start_ns is not None:
+        fields["bfs_start_ns"] = bfs_start_ns
+        fields["bfs_end_ns"] = bfs_end_ns
+    if withdraw_ok:
+        return new_path, "repair_installed", fields
+    fields["stale_path"] = current_path
+    return new_path, "repair_installed_stale_withdraw", fields
 
 
 def execute_startup_install(current_path, down_edges):
@@ -819,10 +845,13 @@ def maybe_retry_repair(current_path, down_edges):
     forever) rather than a designed backoff/circuit-breaker policy."""
     if current_path is not None and not _path_uses_down_edge(current_path, down_edges):
         return current_path, None, None
+    bfs_start_ns = time.perf_counter_ns()
     retry_path = bfs_path(SOURCE, DEST, down_edges)
+    bfs_end_ns = time.perf_counter_ns()
     if retry_path is None:
         return current_path, "repair_retry_no_path", {
             "down_edges": [list(edge) for edge in down_edges],
+            "bfs_start_ns": bfs_start_ns, "bfs_end_ns": bfs_end_ns,
         }
     if retry_path == current_path:
         # Cannot actually happen: BFS never returns a path that traverses
@@ -831,7 +860,11 @@ def maybe_retry_repair(current_path, down_edges):
         # no-op guard, matching decide_link_event()'s own no-op check,
         # rather than assumed unreachable.
         return current_path, None, None
-    return execute_repair({"action": "repair", "new_path": retry_path}, current_path)
+    return execute_repair(
+        {"action": "repair", "new_path": retry_path,
+         "bfs_start_ns": bfs_start_ns, "bfs_end_ns": bfs_end_ns},
+        current_path,
+    )
 
 
 def is_held_down(edge, held_down_until, now):
@@ -978,6 +1011,25 @@ def decide_link_event(name, state, down_edges, held_down_until,
     reconciliation call above has run, so a just-arrived event cannot cause
     reconcile_expired_holddowns to silently claim the recovery this
     function's own return value should report.
+
+    Service-restoration decomposition (Section 10): a `"repair"` or
+    `"repair_failed"` decision includes `bfs_start_ns`/`bfs_end_ns`
+    bracketing the `bfs_path()` call, using the same `time.perf_counter_ns()`
+    clock `execute_repair()` uses for its own `repair_start_ns`/`repair_end_ns`
+    (staging) and `commit_start_ns`/`commit_end_ns` (commit) -- together
+    these let a caller reconstruct detection-to-restoration as distinct
+    phases (BFS completion, staging, commit) instead of one opaque
+    `repair_start_ns`-to-`repair_end_ns` span, closing the gap Section 6.3
+    already disclosed: `repair_start_ns` marks the start of staging, AFTER
+    this BFS call has already run, so the BFS cost was never actually
+    inside the previously-reported "repair-action time" window at all (it
+    is under 0.3 ms on a 200-node graph, Section 2.5, so this did not
+    change any previously-reported number, only what is now separately
+    observable). This is wall-clock instrumentation only -- it does not
+    affect any decision this function makes, and every existing test that
+    passes a synthetic `now` for the state machine's own timing is
+    unaffected, since `now` and `time.perf_counter_ns()` are deliberately
+    different clocks serving different purposes here.
     Returns a dict describing what the caller (main's I/O loop) should do.
     """
     switch, neighbor = MONITORED_INTERFACES[name]
@@ -1001,14 +1053,18 @@ def decide_link_event(name, state, down_edges, held_down_until,
 
     if state == "down" and edge not in down_edges:
         down_edges.add(edge)
+        bfs_start_ns = time.perf_counter_ns()
         new_path = bfs_path(SOURCE, DEST, down_edges)
+        bfs_end_ns = time.perf_counter_ns()
         if not new_path:
             return {"action": "repair_failed", "interface": name,
-                     "reason": "no alternate path avoiding down edges"}
+                     "reason": "no alternate path avoiding down edges",
+                     "bfs_start_ns": bfs_start_ns, "bfs_end_ns": bfs_end_ns}
         if new_path == current_path:
             return {"action": "noop", "interface": name}
         return {"action": "repair", "interface": name, "edge": [switch, neighbor],
-                "old_path": current_path, "new_path": new_path}
+                "old_path": current_path, "new_path": new_path,
+                "bfs_start_ns": bfs_start_ns, "bfs_end_ns": bfs_end_ns}
 
     if state == "up" and edge in down_edges and _edge_confirmed_up(edge, interface_state):
         down_edges.discard(edge)
@@ -1295,14 +1351,19 @@ def main():
             for bad_name, bad_state in invalid:
                 log("invalid_link_state", interface=bad_name, state=bad_state)
             log("monitor_reconnected", target=target or "local", interfaces=sorted(snapshot))
+            bfs_start_ns = time.perf_counter_ns()
             new_path = bfs_path(SOURCE, DEST, down_edges)
+            bfs_end_ns = time.perf_counter_ns()
             if new_path != current_path:
                 if new_path is None:
                     log("repair_failed",
-                        reason="no alternate path avoiding down edges (post-reconnect resync)")
+                        reason="no alternate path avoiding down edges (post-reconnect resync)",
+                        bfs_start_ns=bfs_start_ns, bfs_end_ns=bfs_end_ns)
                 else:
                     current_path, event_name, event_fields = execute_repair(
-                        {"action": "repair", "new_path": new_path}, current_path,
+                        {"action": "repair", "new_path": new_path,
+                         "bfs_start_ns": bfs_start_ns, "bfs_end_ns": bfs_end_ns},
+                        current_path,
                     )
                     log(event_name, **event_fields)
             continue
