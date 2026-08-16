@@ -1,0 +1,33 @@
+{"ts": 1786783615.3654394, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:2"}
+{"ts": 1786783615.375388, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:1"}
+{"ts": 1786783615.3839812, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "cookie=0x5e1fea9e,priority=100,in_port=3,actions=output:1"}
+{"ts": 1786783615.4024103, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:3"}
+{"ts": 1786783615.4209294, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:3"}
+{"ts": 1786783615.4377453, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "cookie=0x5e1fea9e,priority=100,in_port=3,actions=output:1"}
+{"ts": 1786783615.4563794, "event": "agent_started", "initial_path": ["s1", "s3", "s4"], "down_edges": []}
+{"ts": 1786783624.9797783, "event": "link_down_detected", "interface": "s4-eth1", "edge": ["s3", "s4"], "ns": 85652699117493}
+{"ts": 1786783624.979836, "event": "flow_start", "action": "delete", "bridge": "s1", "arg": "cookie=0x5e1fea9e/-1,in_port=1"}
+{"ts": 1786783624.99151, "event": "flow_start", "action": "delete", "bridge": "s1", "arg": "cookie=0x5e1fea9e/-1,in_port=2"}
+{"ts": 1786783625.0009515, "event": "flow_start", "action": "delete", "bridge": "s3", "arg": "cookie=0x5e1fea9e/-1,in_port=3"}
+{"ts": 1786783625.0180495, "event": "flow_start", "action": "delete", "bridge": "s3", "arg": "cookie=0x5e1fea9e/-1,in_port=1"}
+{"ts": 1786783625.0334756, "event": "flow_start", "action": "delete", "bridge": "s4", "arg": "cookie=0x5e1fea9e/-1,in_port=1"}
+{"ts": 1786783625.0514135, "event": "flow_start", "action": "delete", "bridge": "s4", "arg": "cookie=0x5e1fea9e/-1,in_port=3"}
+{"ts": 1786783625.069034, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:2"}
+{"ts": 1786783625.0790281, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:1"}
+{"ts": 1786783625.0879796, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "cookie=0x5e1fea9e,priority=100,in_port=3,actions=output:2"}
+{"ts": 1786783625.1037838, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:3"}
+{"ts": 1786783625.1182523, "event": "flow_start", "action": "add", "bridge": "s5", "arg": "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:2"}
+{"ts": 1786783625.1317868, "event": "flow_start", "action": "add", "bridge": "s5", "arg": "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:1"}
+{"ts": 1786783625.1468897, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:3"}
+{"ts": 1786783625.162212, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "cookie=0x5e1fea9e,priority=100,in_port=3,actions=output:2"}
+{"ts": 1786783625.176396, "event": "repair_installed", "path": ["s1", "s3", "s5", "s4"], "repair_start_ns": 85652699180658, "repair_end_ns": 85652895748413, "held_down_seconds": 2.0}
+{"ts": 1786783625.1764467, "event": "transition_suppressed", "interface": "s3-eth1", "state": "down", "remaining_s": 1.8033210809953744}
+Exception ignored in: <module 'threading' from '/usr/lib/python3.12/threading.py'>
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/threading.py", line 1573, in _shutdown
+2026-08-15T08:47:10Z|00001|fatal_signal|WARN|terminating with signal 15 (Terminated)
+    def _shutdown():
+    
+  File "/home/ubuntu/daim/experiments/network/daim_link_agent.py", line 44, in _terminate_monitor_and_exit
+    sys.exit(0)
+SystemExit: 0

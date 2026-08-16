@@ -1,0 +1,213 @@
+{
+  "conditions": {
+    "agent_diamond": {
+      "condition": "agent_diamond",
+      "n": 5,
+      "unit": "ms",
+      "mean": 270.128,
+      "sd": 54.292,
+      "median": 246.659,
+      "q1": 241.865,
+      "q3": 283.875,
+      "iqr": 42.01,
+      "median_ci95_lower": 220.088,
+      "median_ci95_upper": 358.151,
+      "raw": [
+        283.875247,
+        246.65850899999998,
+        241.86521,
+        358.15089,
+        220.087863
+      ]
+    },
+    "multi_ovs": {
+      "condition": "multi_ovs",
+      "n": 5,
+      "unit": "ms",
+      "mean": 873.936,
+      "sd": 149.443,
+      "median": 832.09,
+      "q1": 797.04,
+      "q3": 993.83,
+      "iqr": 196.79,
+      "median_ci95_lower": 689.93,
+      "median_ci95_upper": 1056.79,
+      "raw": [
+        832.09,
+        993.83,
+        689.93,
+        797.04,
+        1056.79
+      ]
+    },
+    "topology_ring_8": {
+      "condition": "topology_ring_8",
+      "n": 3,
+      "unit": "ms",
+      "mean": 294.915,
+      "sd": 6.837,
+      "median": 295.639,
+      "q1": 291.692,
+      "q3": 298.501,
+      "iqr": 6.808,
+      "median_ci95_lower": 287.745,
+      "median_ci95_upper": 301.362,
+      "raw": [
+        295.639323,
+        287.74498100000005,
+        301.361829
+      ]
+    },
+    "topology_ring_20": {
+      "condition": "topology_ring_20",
+      "n": 3,
+      "unit": "ms",
+      "mean": 714.377,
+      "sd": 25.795,
+      "median": 705.649,
+      "q1": 699.864,
+      "q3": 724.527,
+      "iqr": 24.663,
+      "median_ci95_lower": 694.079,
+      "median_ci95_upper": 743.404,
+      "raw": [
+        705.648892,
+        694.078647,
+        743.404403
+      ]
+    },
+    "topology_fattree_k4": {
+      "condition": "topology_fattree_k4",
+      "n": 3,
+      "unit": "ms",
+      "mean": 267.831,
+      "sd": 1.025,
+      "median": 267.573,
+      "q1": 267.266,
+      "q3": 268.266,
+      "iqr": 1.0,
+      "median_ci95_lower": 266.959,
+      "median_ci95_upper": 268.96,
+      "raw": [
+        266.958875,
+        267.573368,
+        268.95956
+      ]
+    },
+    "baseline_controller_driven": {
+      "condition": "baseline_controller_driven",
+      "n": 5,
+      "unit": "ms",
+      "mean": 3.644,
+      "sd": 0.812,
+      "median": 3.477,
+      "q1": 3.333,
+      "q3": 3.881,
+      "iqr": 0.547,
+      "median_ci95_lower": 2.661,
+      "median_ci95_upper": 4.865,
+      "raw": [
+        2.661409,
+        3.3333139999999997,
+        3.476645,
+        3.880721,
+        4.865454
+      ]
+    },
+    "baseline_fast_failover_forward": {
+      "condition": "baseline_fast_failover_forward",
+      "n": 51,
+      "unit": "ms",
+      "mean": 151.569,
+      "sd": 98.901,
+      "median": 160.0,
+      "q1": 60.0,
+      "q3": 220.0,
+      "iqr": 160.0,
+      "median_ci95_lower": 80.0,
+      "median_ci95_upper": 200.0,
+      "raw": [
+        20.0,
+        340.0,
+        20.0,
+        60.0,
+        220.0,
+        280.0,
+        40.0,
+        120.0,
+        220.0,
+        140.0,
+        280.0,
+        100.0,
+        240.0,
+        220.0,
+        160.0,
+        10.0,
+        180.0,
+        160.0,
+        260.0,
+        180.0,
+        220.0,
+        240.0,
+        10.0,
+        140.0,
+        20.0,
+        240.0,
+        80.0,
+        200.0,
+        10.0,
+        180.0,
+        240.0,
+        40.0,
+        80.0,
+        40.0,
+        160.0,
+        240.0,
+        20.0,
+        80.0,
+        200.0,
+        200.0,
+        80.0,
+        60.0,
+        160.0,
+        340.0,
+        340.0,
+        60.0,
+        20.0,
+        80.0,
+        320.0,
+        200.0,
+        180.0
+      ]
+    }
+  },
+  "significance_tests": [
+    {
+      "a": "agent_diamond",
+      "b": "baseline_controller_driven",
+      "n_a": 5,
+      "n_b": 5,
+      "u_statistic": 25.0,
+      "p_value": 0.007936507936507936,
+      "significant_at_0.05": true
+    },
+    {
+      "a": "agent_diamond",
+      "b": "baseline_fast_failover_forward",
+      "n_a": 5,
+      "n_b": 51,
+      "u_statistic": 225.0,
+      "p_value": 0.005226179274727463,
+      "significant_at_0.05": true
+    },
+    {
+      "a": "baseline_controller_driven",
+      "b": "baseline_fast_failover_forward",
+      "n_a": 5,
+      "n_b": 51,
+      "u_statistic": 0.0,
+      "p_value": 0.0002556930538489771,
+      "significant_at_0.05": true
+    }
+  ]
+}

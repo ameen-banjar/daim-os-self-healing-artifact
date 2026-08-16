@@ -329,8 +329,10 @@ def draw_recovery_chart(path):
     left, top, right, bottom = 170, 200, 1660, 870
     draw.line((left, top, left, bottom), fill="#222222", width=3)
     draw.line((left, bottom, right, bottom), fill="#222222", width=3)
-    ymax = 200.0
-    for tick in range(0, 201, 25):
+    data_max = max(max(r["detection_ms"], r["repair_ms"]) for r in rows)
+    tick_step = 25 if data_max <= 200 else 50 if data_max <= 400 else 100
+    ymax = (int(data_max / tick_step) + 1) * tick_step * 1.1
+    for tick in range(0, int(ymax) + 1, tick_step):
         y = bottom - (tick / ymax) * (bottom - top)
         draw.line((left - 10, y, right, y), fill="#dddddd", width=1)
         draw.text((70, y - 16), str(tick), fill="#222222", font=small)

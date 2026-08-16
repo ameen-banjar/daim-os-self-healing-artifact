@@ -1,0 +1,25 @@
+{"ts": 1786783574.896211, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:2"}
+{"ts": 1786783574.9070685, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:1"}
+{"ts": 1786783574.917376, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "cookie=0x5e1fea9e,priority=100,in_port=3,actions=output:1"}
+{"ts": 1786783574.9348748, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:3"}
+{"ts": 1786783574.9531364, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:3"}
+{"ts": 1786783574.9734392, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "cookie=0x5e1fea9e,priority=100,in_port=3,actions=output:1"}
+{"ts": 1786783574.9915874, "event": "agent_started", "initial_path": ["s1", "s3", "s4"], "down_edges": []}
+{"ts": 1786783584.4808493, "event": "link_down_detected", "interface": "s4-eth1", "edge": ["s3", "s4"], "ns": 85612200186426}
+{"ts": 1786783584.4809048, "event": "flow_start", "action": "delete", "bridge": "s1", "arg": "cookie=0x5e1fea9e/-1,in_port=1"}
+{"ts": 1786783584.4927282, "event": "flow_start", "action": "delete", "bridge": "s1", "arg": "cookie=0x5e1fea9e/-1,in_port=2"}
+{"ts": 1786783584.5029793, "event": "flow_start", "action": "delete", "bridge": "s3", "arg": "cookie=0x5e1fea9e/-1,in_port=3"}
+{"ts": 1786783584.5200343, "event": "flow_start", "action": "delete", "bridge": "s3", "arg": "cookie=0x5e1fea9e/-1,in_port=1"}
+{"ts": 1786783584.5344253, "event": "flow_start", "action": "delete", "bridge": "s4", "arg": "cookie=0x5e1fea9e/-1,in_port=1"}
+{"ts": 1786783584.549832, "event": "flow_start", "action": "delete", "bridge": "s4", "arg": "cookie=0x5e1fea9e/-1,in_port=3"}
+{"ts": 1786783584.564284, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:2"}
+{"ts": 1786783584.5749483, "event": "flow_start", "action": "add", "bridge": "s1", "arg": "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:1"}
+{"ts": 1786783584.5835857, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "cookie=0x5e1fea9e,priority=100,in_port=3,actions=output:2"}
+{"ts": 1786783584.5990634, "event": "flow_start", "action": "add", "bridge": "s3", "arg": "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:3"}
+{"ts": 1786783584.6144738, "event": "flow_start", "action": "add", "bridge": "s5", "arg": "cookie=0x5e1fea9e,priority=100,in_port=1,actions=output:2"}
+{"ts": 1786783584.6287222, "event": "flow_start", "action": "add", "bridge": "s5", "arg": "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:1"}
+{"ts": 1786783584.6432593, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "cookie=0x5e1fea9e,priority=100,in_port=2,actions=output:3"}
+{"ts": 1786783584.658039, "event": "flow_start", "action": "add", "bridge": "s4", "arg": "cookie=0x5e1fea9e,priority=100,in_port=3,actions=output:2"}
+{"ts": 1786783584.6725097, "event": "repair_installed", "path": ["s1", "s3", "s5", "s4"], "repair_start_ns": 85612200250634, "repair_end_ns": 85612391863501, "held_down_seconds": 2.0}
+{"ts": 1786783584.6725543, "event": "transition_suppressed", "interface": "s3-eth1", "state": "down", "remaining_s": 1.808282383994083}
+2026-08-15T08:46:29Z|00001|fatal_signal|WARN|terminating with signal 15 (Terminated)

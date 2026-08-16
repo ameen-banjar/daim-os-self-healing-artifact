@@ -201,6 +201,36 @@ uses them.
   — the two formal-baseline harnesses and their raw data from the v0.18.0
   experiments described below.
 
+## Final statistical replication (v0.19.0)
+
+Layer 2 step 5/6 of the evidence-gathering plan, closing Section 10's "statistical replication"
+evidence-gate item.
+
+**Replication counts derived from pilot variability** (`analysis/paper3_final_statistics.py`):
+`n_final = ceil((1.96 * pilot_sd / (0.20 * pilot_mean))^2)`, targeting a 95%-CI half-width of 20% of
+the pilot mean, floored at the pilot `n` itself. The diamond agent, multi-OVS, controller-driven
+baseline, and the three new topologies all already met the target at pilot size (n=5 or n=3); the
+fast-failover baseline's pilot coefficient of variation (72.3%, driven by its metric's own 20ms
+quantization granularity) required extending from n=5 to n=51.
+
+**Two conditions re-run fresh against current code**: the diamond agent
+(`network/stage3_autonomous_agent.py`) and multi-OVS deployment, replacing the historical pilot data
+those raw CSVs previously held (retained separately as `..._pre_final_statistical_replication.*`) and
+closing the long-disclosed "reported timings predate the two-phase staging/forwarding-consistency/
+ambiguous-outcome correctness work" gap with real current numbers. Both rose substantially (diamond:
+157.67ms -> 270.13ms mean repair-action; multi-OVS: 203.54ms -> 873.94ms mean) -- an honest, expected
+cost of that same correctness work, not a regression.
+
+**Statistics**: median/IQR and bootstrap 95% CIs (10000 resamples) for every condition; three
+unpaired Mann-Whitney U significance tests (no genuinely matched-pairs design exists across this
+paper's independent Mininet/OVS process launches, so Wilcoxon rank-sum replaces Wilcoxon
+signed-rank) -- agent vs. controller-driven baseline (p=0.0079), agent vs. fast-failover baseline
+(p=0.0052), and the two baselines against each other (p=0.0003), all significant at 0.05.
+
+Full detail: `results/network/STAGE3_FINAL_STATISTICS_REPORT.md`.
+
+No new unit tests this round; 33/33 existing tests still pass.
+
 ## Formal baselines: fast-failover group and controller-driven recovery (v0.18.0)
 
 Layer 2 step 4 of the evidence-gathering plan, closing Section 10's "formal baselines" evidence-gate
