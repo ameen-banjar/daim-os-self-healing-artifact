@@ -9,8 +9,8 @@ authors:
 version: 0.18.0
 date-released: 2026-08-16
 license: Apache-2.0
-# doi: TODO -- fill in the v0.18.0 version-specific DOI once this tag's
-# release is minted by Zenodo. v0.17.0 DOI: 10.5281/zenodo.21959738.
+doi: 10.5281/zenodo.21966131
+# v0.17.0 DOI: 10.5281/zenodo.21959738.
 # v0.16.0 DOI: 10.5281/zenodo.21955155.
 # v0.15.0 DOI: 10.5281/zenodo.21954343.
 # v0.14.0 DOI: 10.5281/zenodo.21953875.
