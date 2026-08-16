@@ -1,0 +1,6 @@
+baseline,repetition,forward_echo_requests_sent,forward_echo_requests_arrived_at_h2,forward_missing_count,forward_longest_missing_run,forward_outage_bound_lower_ms,forward_outage_bound_upper_ms,forward_direction_recovered,reverse_ping_packets_sent,reverse_ping_packets_received,reverse_ping_packet_loss_pct,reverse_direction_recovered
+fast_failover_group,1,250,242,8,8,140.0,180.0,True,20,0,100.0,False
+fast_failover_group,2,250,247,3,3,40.0,80.0,True,20,0,100.0,False
+fast_failover_group,3,250,241,9,9,160.0,200.0,True,20,0,100.0,False
+fast_failover_group,4,250,246,4,4,60.0,100.0,True,20,0,100.0,False
+fast_failover_group,5,250,250,0,0,0,20.0,True,20,0,100.0,False

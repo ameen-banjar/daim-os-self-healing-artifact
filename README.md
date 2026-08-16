@@ -192,6 +192,52 @@ uses them.
   `bfs_scaling_benchmark_raw.csv`, `bfs_scaling_benchmark_summary.json`,
   `stage3_topology_scale_raw.csv`, `..._events.jsonl` — the report and raw
   data from the v0.17.0 experiments described below.
+- `network/stage3_baseline_fast_failover.py`, `network/osken_recovery_baseline_controller.py`,
+  `network/osken_launcher.py` (a hand-written os_ken app launcher, needed since
+  the pip-distributed `os-ken` package's latest release ships no console-script
+  entry point), `network/stage3_baseline_controller_driven.py`, and
+  `results/network/STAGE3_FORMAL_BASELINES_REPORT.md`,
+  `stage3_baseline_fast_failover_raw.csv`, `stage3_baseline_controller_driven_raw.csv`
+  — the two formal-baseline harnesses and their raw data from the v0.18.0
+  experiments described below.
+
+## Formal baselines: fast-failover group and controller-driven recovery (v0.18.0)
+
+Layer 2 step 4 of the evidence-gathering plan, closing Section 10's "formal baselines" evidence-gate
+item: both a real OpenFlow fast-failover-group configuration and a real controller-driven recovery
+path, measured on the identical diamond topology and `s1-s2` fault injection the agent's own Table 2
+uses.
+
+**Fast-failover group (`stage3_baseline_fast_failover.py`).** A real OpenFlow13 `type=ff` group,
+pre-installed on `s1` (buckets: primary `watch_port=2` to `s2`, backup `watch_port=3` to `s3`), pure
+dataplane, no controller or agent process at all. An empirical smoke test found a real, structural
+limitation before any measurement was taken: the group only reacts to the LOCAL switch's own watched
+port. Forward (`h1->h2`) traffic recovers correctly in all 5 repetitions (outage bound 0-200ms,
+observed via `tcpdump`-captured ICMP echo-request arrivals at `h2` -- overlapping rather than
+dramatically beating the agent's own 157.67ms mean repair time). Reverse (`h2->h1`) traffic NEVER
+recovers (0/5, 100% loss every time), since `s4` -- the switch that would need to reroute it -- has
+no local signal the fault occurred; not a bug, the textbook scope of OpenFlow fast failover.
+
+**Controller-driven recovery (`stage3_baseline_controller_driven.py`,
+`osken_recovery_baseline_controller.py`).** A new os_ken application proactively installs the primary
+path, reacts to a real `EventOFPPortStatus` down event, and pushes a hardcoded two-path swap across
+both affected switches (`s1` and `s4`), confirmed via `OFPBarrierRequest`/`OFPBarrierReply`. Unlike
+the fast-failover group, a real controller has global topology visibility, so both directions
+recover: 5/5 repetitions, mean detection 10.85ms, mean repair-action 3.64ms, 0-1.25% loss -- faster
+than the agent on every metric, read as the cost of the correctness machinery (two-phase staging,
+forwarding-consistency check, ambiguous-outcome read-back) this hardcoded six-FlowMod baseline has
+none of, not evidence the agent's own approach is simply slower at the same task. A packaging gap was
+found and worked around: the pip-distributed `os-ken` package's latest release (4.2.1) ships no
+`cmd`/manager console-script entry point; `os-ken==2.6.0` (already pinned by this repository's own
+Paper 1 `controller_requirements.txt`) does ship one, and a hand-written launcher
+(`osken_launcher.py`) replicating the standard `AppManager`+`OpenFlowController` bring-up sequence was
+validated against the existing `osken_learning_controller.py` before writing the recovery-specific
+application.
+
+Full detail, result tables, and discussion: `results/network/STAGE3_FORMAL_BASELINES_REPORT.md`.
+
+No new unit tests this round (both items are live-network baseline harnesses, not
+`daim_link_agent.py` changes); 33/33 existing tests still pass.
 
 ## Multiple topologies and scale, verified live (v0.17.0)
 

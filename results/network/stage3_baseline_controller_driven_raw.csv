@@ -1,0 +1,6 @@
+packets_sent,packets_received,packet_loss_pct,evidence_level,baseline,repetition,failure_to_detection_us,repair_action_us,repaired_path,controller_event_count
+80,80,0.0,measured_emulation_controller_driven_baseline,controller_driven,1,15064.556,2661.409,"s1,s3,s4",7
+80,80,0.0,measured_emulation_controller_driven_baseline,controller_driven,2,7112.078,3333.314,"s1,s3,s4",7
+80,79,1.25,measured_emulation_controller_driven_baseline,controller_driven,3,11535.54,3476.645,"s1,s3,s4",7
+80,80,0.0,measured_emulation_controller_driven_baseline,controller_driven,4,10814.346,3880.721,"s1,s3,s4",7
+80,79,1.25,measured_emulation_controller_driven_baseline,controller_driven,5,9717.033,4865.454,"s1,s3,s4",7
