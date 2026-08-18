@@ -201,6 +201,40 @@ uses them.
   — the two formal-baseline harnesses and their raw data from the v0.18.0
   experiments described below.
 
+## Unified service-restoration metric, correcting a construct-validity gap (v0.20.0)
+
+A reviewer identified a real construct-validity problem in v0.18.0/v0.19.0's own formal-baseline
+comparison: it compared the agent's own `repair_action_us` (a CONTROL-PLANE interval -- ending at
+Flow-Mod confirmation, not a traffic-confirmed restoration time) against the fast-failover baseline's
+ping-derived outage BOUND (a DATA-PLANE observation) -- correct arithmetic, comparing two different
+endpoints. `network/stage3_service_restoration_unified.py` replaces this with one unified, real
+data-plane metric measured identically for all three mechanisms (autonomous agent, fast-failover
+group, controller-driven recovery): two continuous, independent ICMP probes (`h1->h2`, `h2->h1`) at a
+5ms interval, each direction's arrivals captured via `tcpdump` on the receiving host, filtered to
+genuine echo-requests from the expected sender only.
+
+**A real bug found and fixed during development**: an early version declared "recovered" on the first
+packet arriving after the fault, producing a false ~5ms "recovery" for fast-failover's reverse
+direction in ~5% of repetitions -- contradicting the already-established 0/51 finding. Root-caused by
+retaining raw captures for one debug repetition: the "recovering" packet was the LAST one ever seen
+out of 700 sent, with total silence afterward -- a packet already in flight microseconds before
+`net.configLinkStatus()` was called, not genuine restoration. Fixed by requiring a sustained run of at
+least 3 consecutive received sequence numbers to count as recovery.
+
+**Results** (n=3 agent, n=54 controller-driven, n=39 fast-failover -- 2 of 41 fast-failover
+repetitions excluded as a harness/capture-startup flake, confirmed via a clean 15-repetition
+follow-up): the agent is significantly slower than both baselines on this unified metric
+(Mann-Whitney U, p<0.01 both comparisons) -- consistent with the earlier comparison's headline
+conclusion, now on solid methodological footing. A genuinely new finding this unified metric reveals:
+**controller-driven and fast-failover are statistically indistinguishable from each other**
+(p=0.950), which the earlier comparison could not show since it never compared the two baselines to
+each other on the same construct. Fast-failover's reverse-direction non-recovery is confirmed as a
+hard structural 0% (0/39), not a rare event.
+
+Full detail: `results/network/STAGE3_SERVICE_RESTORATION_UNIFIED_REPORT.md`.
+
+No new unit tests this round; 33/33 existing tests still pass.
+
 ## Final statistical replication (v0.19.0)
 
 Layer 2 step 5/6 of the evidence-gathering plan, closing Section 10's "statistical replication"

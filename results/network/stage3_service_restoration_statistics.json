@@ -1,0 +1,141 @@
+{
+  "recovery_rates": {
+    "agent": {
+      "n": 3,
+      "forward_recovery_rate": 1.0,
+      "reverse_recovery_rate": 1.0
+    },
+    "controller_driven": {
+      "n": 54,
+      "forward_recovery_rate": 1.0,
+      "reverse_recovery_rate": 0.9814814814814815
+    },
+    "fast_failover": {
+      "n": 39,
+      "forward_recovery_rate": 1.0,
+      "reverse_recovery_rate": 0.0
+    }
+  },
+  "forward_restoration": {
+    "agent": {
+      "condition": "agent_forward",
+      "n": 3,
+      "mean_ms": 264.789,
+      "sd_ms": 21.264,
+      "median_ms": 265.731,
+      "q1_ms": 254.4,
+      "q3_ms": 275.649,
+      "iqr_ms": 21.249,
+      "median_ci95_lower_ms": 243.069,
+      "median_ci95_upper_ms": 285.566
+    },
+    "controller_driven": {
+      "condition": "controller_driven_forward",
+      "n": 54,
+      "mean_ms": 21.261,
+      "sd_ms": 9.564,
+      "median_ms": 20.105,
+      "q1_ms": 15.561,
+      "q3_ms": 20.575,
+      "iqr_ms": 5.014,
+      "median_ci95_lower_ms": 15.872,
+      "median_ci95_upper_ms": 20.197
+    },
+    "fast_failover": {
+      "condition": "fast_failover_forward",
+      "n": 39,
+      "mean_ms": 19.605,
+      "sd_ms": 6.874,
+      "median_ms": 15.894,
+      "q1_ms": 15.588,
+      "q3_ms": 20.698,
+      "iqr_ms": 5.11,
+      "median_ci95_lower_ms": 15.693,
+      "median_ci95_upper_ms": 20.541
+    }
+  },
+  "reverse_restoration": {
+    "agent": {
+      "condition": "agent_reverse",
+      "n": 3,
+      "mean_ms": 320.577,
+      "sd_ms": 22.667,
+      "median_ms": 319.129,
+      "q1_ms": 308.899,
+      "q3_ms": 331.531,
+      "iqr_ms": 22.632,
+      "median_ci95_lower_ms": 298.669,
+      "median_ci95_upper_ms": 343.933
+    },
+    "controller_driven": {
+      "condition": "controller_driven_reverse",
+      "n": 53,
+      "mean_ms": 20.087,
+      "sd_ms": 6.073,
+      "median_ms": 20.1,
+      "q1_ms": 15.488,
+      "q3_ms": 21.006,
+      "iqr_ms": 5.518,
+      "median_ci95_lower_ms": 15.93,
+      "median_ci95_upper_ms": 20.48
+    }
+  },
+  "control_plane_decomposition": {
+    "agent": {
+      "bfs_mean_ms": 0.0107,
+      "stage_mean_ms": 301.391,
+      "commit_mean_ms": 104.839,
+      "total_control_plane_mean_ms": 406.23
+    },
+    "controller_driven": {
+      "bfs_mean_ms": null,
+      "stage_mean_ms": null,
+      "commit_mean_ms": null,
+      "total_control_plane_mean_ms": 2.534
+    },
+    "fast_failover": {
+      "bfs_mean_ms": null,
+      "stage_mean_ms": null,
+      "commit_mean_ms": null,
+      "total_control_plane_mean_ms": null
+    }
+  },
+  "significance_tests": [
+    {
+      "a": "agent",
+      "b": "controller_driven",
+      "n_a": 3,
+      "n_b": 54,
+      "u_statistic": 162.0,
+      "p_value": 6.83526999316473e-05,
+      "significant_at_0.05": true
+    },
+    {
+      "a": "agent",
+      "b": "fast_failover",
+      "n_a": 3,
+      "n_b": 39,
+      "u_statistic": 117.0,
+      "p_value": 0.00017421602787456446,
+      "significant_at_0.05": true
+    },
+    {
+      "a": "controller_driven",
+      "b": "fast_failover",
+      "n_a": 54,
+      "n_b": 39,
+      "u_statistic": 1061.5,
+      "p_value": 0.9503352281568552,
+      "significant_at_0.05": false
+    },
+    {
+      "a": "agent",
+      "b": "controller_driven",
+      "n_a": 3,
+      "n_b": 53,
+      "u_statistic": 159.0,
+      "p_value": 0.004044402327827613,
+      "significant_at_0.05": true
+    }
+  ]
+}
