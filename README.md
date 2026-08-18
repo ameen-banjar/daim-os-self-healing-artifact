@@ -201,6 +201,34 @@ uses them.
   — the two formal-baseline harnesses and their raw data from the v0.18.0
   experiments described below.
 
+## Second-pass final-review fixes: Figure 2, claim scoping, stopping-rule honesty (v0.23.0)
+
+A follow-up review of the v0.22.0 manuscript (accepting the n=20 extension and Wilson CIs as
+sufficient) found four further issues, all fixed without new measurements. (1) Figure 2
+(`results/paper3/paper3_sequence.png`) still showed the OLD, unsafe delete-old-path-then-add-new-path
+sequence Section 5.2's two-phase protocol replaced -- regenerated to show stage (add) -> Flow-Mod ->
+commit (withdraw stale) -> confirmed -> hold-down, matching the actual current protocol; a rendering
+bug found while fixing this (a long edge label's white background box was erasing the arrow beneath
+it) was also fixed. (2) The fast-failover baseline's reverse-direction non-recovery had been
+described in places as fast-failover "structurally cannot" recover it in general, and linked to DFR/
+Periplus as if they shared the same limitation -- narrowed everywhere to "the single-group, local-port
+configuration evaluated here," since DFR's pre-installed k-shortest backup paths and Periplus's
+per-hop forwarding-graph encoding are not evaluated in this paper and are not claimed to share this
+property. (3) The n=20 replication's own description called it a "predefined stopping rule" with a
+numeric target "stabilising to a tight, consistent precision" -- honest reporting requires either
+stating the actual pre-registered numeric threshold or describing the extension as the pragmatic,
+after-the-fact decision it actually was; fixed to the latter, everywhere it appeared (this repository,
+the manuscript, `paper3_service_restoration_statistics.py`'s own module docstring is unaffected since
+it never used the "predefined" framing). (4) A real logic discrepancy between the manuscript and the
+code: `repair_failed` (BFS finds no alternate path) does not set `current_path` to `None` -- that is
+`execute_repair()`'s own contract for a flow-installation failure, a different code path entirely;
+`repair_failed` leaves `current_path` unchanged (still recording the now-broken old path), and
+`maybe_retry_repair()`'s periodic-tick check (`current_path` traverses a down edge) means the agent
+keeps retrying BFS every tick indefinitely for a genuinely unrecoverable topology like `linear_10`,
+not "taking no further action" as previously described.
+
+No agent-logic changes; 33/33 existing unit tests still pass.
+
 ## Agent unified-restoration replication extended to n=20, and final-review fixes (v0.22.0)
 
 A full external Q1-style review of the compressed manuscript (v0.20.0/v0.21.0-era text) found that
@@ -209,9 +237,9 @@ formula used throughout this evidence set, this left the headline agent-vs-basel
 distribution represented by only three observations -- a deeper concern than that formula addresses,
 given the reported statistics are the median, its bootstrap CI, and the unpaired Mann-Whitney test
 rather than the mean. `network/stage3_service_restoration_unified.py` was re-run for 17 further agent
-repetitions under a predefined stopping rule matched to those estimators (continue until the
-bootstrap 95% CI on the median stabilises to a tight, consistent precision); it did, at n=20 (CI
-half-width ~2.5% of the median). All 17 additional repetitions recovered both directions cleanly.
+repetitions (no numeric target was fixed in advance for this specific extension); the result was
+then re-examined at n=20, where the bootstrap 95% CI on the median is ~2.5% of the median -- tight
+and stable compared to the wider, less certain estimate n=3 supported. All 17 additional repetitions recovered both directions cleanly.
 `analysis/paper3_service_restoration_statistics.py` was extended with Wilson score 95% confidence
 intervals for every recovery-rate proportion, since several are 0/n or n/n and a bare percentage
 understates the real uncertainty at these sample sizes.

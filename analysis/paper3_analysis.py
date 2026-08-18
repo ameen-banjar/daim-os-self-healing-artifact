@@ -208,12 +208,12 @@ def draw_architecture(path):
 # ------------------------------------------------------------- Figure 2 ----
 
 def draw_sequence(path):
-    width, height = 2000, 1350
+    width, height = 2000, 1620
     image = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(image)
     title_font = ImageFont.load_default(size=50)
     font = ImageFont.load_default(size=36)
-    small = ImageFont.load_default(size=33)
+    small = ImageFont.load_default(size=31)
 
     draw.text((24, 24), "Link failure to repaired path: message sequence", fill="#111111", font=title_font)
 
@@ -225,7 +225,7 @@ def draw_sequence(path):
         ("daim_ovs_flow\nadapter", 1780),
     ]
     top_y = 130
-    bottom_y = 1230
+    bottom_y = 1450
     for name, x in actors:
         tw, th = text_block_size(draw, name, font)
         box(draw, (x - tw / 2 - 26, top_y, x + tw / 2 + 26, top_y + th + 30), name, font, fill="#EAF2FB", outline="#0072B2")
@@ -237,13 +237,15 @@ def draw_sequence(path):
         ("ovsdb-server", "ovsdb-client\nmonitor", "2  monitor push update", False),
         ("ovsdb-client\nmonitor", "daim_link_agent\n(watcher + BFS)", "3  JSON row on stdout", False),
         ("daim_link_agent\n(watcher + BFS)", "daim_link_agent\n(watcher + BFS)", "4  BFS over declared graph", False),
-        ("daim_link_agent\n(watcher + BFS)", "daim_ovs_flow\nadapter", "5  delete (old path)", False),
-        ("daim_link_agent\n(watcher + BFS)", "daim_ovs_flow\nadapter", "6  add (new path)", False),
-        ("daim_ovs_flow\nadapter", "OVS switch\n(s1-eth2)", "7  Flow-Mod installs rule", False),
-        ("daim_link_agent\n(watcher + BFS)", "daim_link_agent\n(watcher + BFS)", "8  start hold-down window", True),
+        ("daim_link_agent\n(watcher + BFS)", "daim_ovs_flow\nadapter", "5  dump-flows conflict check", False),
+        ("daim_link_agent\n(watcher + BFS)", "daim_ovs_flow\nadapter", "6  stage new path (add)", False),
+        ("daim_ovs_flow\nadapter", "OVS switch\n(s1-eth2)", "7  Flow-Mod installs new-path rule", False),
+        ("daim_link_agent\n(watcher + BFS)", "daim_ovs_flow\nadapter", "8  commit (withdraw stale)", False),
+        ("daim_link_agent\n(watcher + BFS)", "daim_link_agent\n(watcher + BFS)", "9  repair_installed confirmed", False),
+        ("daim_link_agent\n(watcher + BFS)", "daim_link_agent\n(watcher + BFS)", "10  start hold-down window", True),
     ]
     y = 310
-    step_h = 118
+    step_h = 108
     for src, dst, label, dashed in steps:
         x0, x1 = xs[src], xs[dst]
         if x0 == x1:
@@ -254,8 +256,10 @@ def draw_sequence(path):
         y += step_h
 
     draw.text(
-        (24, 1275),
-        f"Dashed: internal state update, not a message on the wire. Hold-down window = {HOLD_DOWN_SECONDS:.1f}s by default.",
+        (24, bottom_y + 45),
+        f"Dashed: internal state update, not a message on the wire. New path is staged (step 6) before the old\n"
+        f"path is withdrawn (step 8) -- make-before-break; a staging failure rolls back rather than reaching step 8.\n"
+        f"Hold-down window = {HOLD_DOWN_SECONDS:.1f}s by default.",
         fill="#555555", font=small,
     )
     image.save(path)

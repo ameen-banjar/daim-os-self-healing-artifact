@@ -62,11 +62,12 @@ supporting this attribution. 39 valid fast-failover repetitions are reported.
 agent's pilot n=3 satisfied the mean/CV-based formula above, this left the headline
 agent-vs-baseline comparison's own distribution represented by only three observations -- a deeper
 concern than that formula addresses, given the reported statistics are the median, its bootstrap CI,
-and the unpaired Mann-Whitney test rather than the mean. 17 further agent repetitions were run
-(`stage3_service_restoration_unified.py agent 17 4`) under a predefined stopping rule matched to
-those estimators: continue in batches until the bootstrap 95% CI on the median stabilises to a
-tight, consistent precision. It did, at n=20 (CI half-width approximately 2.5% of the median), so
-collection stopped there. All 17 additional repetitions recovered both directions cleanly (20/20
+and the unpaired Mann-Whitney test rather than the mean. 17 further agent repetitions were
+pragmatically run (`stage3_service_restoration_unified.py agent 17 4`; no numeric target was fixed
+in advance for this specific extension), then the result re-examined: at the resulting n=20, the
+bootstrap 95% CI on the median is approximately 2.5% of the median -- tight and stable compared to
+the wider, less certain estimate n=3 supported -- so collection stopped there. All 17 additional
+repetitions recovered both directions cleanly (20/20
 forward, 20/20 reverse). The controller-driven and fast-failover datasets were not re-run, since
 their own precision was already established and this review did not raise a concern specific to
 them. All numbers below reflect the n=20 agent dataset.
