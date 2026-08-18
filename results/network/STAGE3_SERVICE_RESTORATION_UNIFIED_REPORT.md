@@ -1,6 +1,7 @@
 # Unified Service-Restoration Metric Report
 
-Date: 17-18 August 2026
+Date: 17-18 August 2026; agent replication extended to n=20, 18 August 2026 (see "Agent replication
+extended" below)
 Environment: Ubuntu 24.04 LTS ARM64 (Multipass VM `daim-lab`), Open vSwitch 3.3.4, Mininet 2.3.0,
 os-ken 2.6.0 -- exact version match to every prior live experiment in this evidence set.
 Evidence level: `measured_emulation_service_restoration_unified`
@@ -57,27 +58,42 @@ pre-fault baseline) -- a diagnostic signature distinct from every other fast-fai
 (which always captured valid forward data). A targeted 15-repetition follow-up ran clean in all 15,
 supporting this attribution. 39 valid fast-failover repetitions are reported.
 
+**Agent replication extended to n=20 (18 August 2026).** A subsequent review noted that while the
+agent's pilot n=3 satisfied the mean/CV-based formula above, this left the headline
+agent-vs-baseline comparison's own distribution represented by only three observations -- a deeper
+concern than that formula addresses, given the reported statistics are the median, its bootstrap CI,
+and the unpaired Mann-Whitney test rather than the mean. 17 further agent repetitions were run
+(`stage3_service_restoration_unified.py agent 17 4`) under a predefined stopping rule matched to
+those estimators: continue in batches until the bootstrap 95% CI on the median stabilises to a
+tight, consistent precision. It did, at n=20 (CI half-width approximately 2.5% of the median), so
+collection stopped there. All 17 additional repetitions recovered both directions cleanly (20/20
+forward, 20/20 reverse). The controller-driven and fast-failover datasets were not re-run, since
+their own precision was already established and this review did not raise a concern specific to
+them. All numbers below reflect the n=20 agent dataset.
+
 ## Results
 
 **Recovery rates.**
 
 | Mechanism | n | Forward recovered | Reverse recovered |
 |---|---:|---|---|
-| Autonomous agent | 3 | 100% (3/3) | 100% (3/3) |
-| Controller-driven | 54 | 100% (54/54) | 98% (53/54) |
-| Fast-failover group | 39 | 100% (39/39) | **0% (0/39)** |
+| Autonomous agent | 20 | 100% (20/20), Wilson 95% CI [83.9%, 100%] | 100% (20/20), Wilson 95% CI [83.9%, 100%] |
+| Controller-driven | 54 | 100% (54/54), Wilson 95% CI [93.4%, 100%] | 98% (53/54), Wilson 95% CI [90.2%, 99.7%] |
+| Fast-failover group | 39 | 100% (39/39), Wilson 95% CI [91.0%, 100%] | **0% (0/39), Wilson 95% CI [0.0%, 9.0%]** |
 
-Controller-driven's one reverse non-recovery (of 54) is reported honestly as a real, rare observation
--- the control-plane log confirms the controller detected the fault and acted (forward direction
-recovered normally in that same repetition), so this is not attributable to the same harness-flake
-signature the two excluded fast-failover repetitions showed; it is not further explained here, kept
-as a disclosed, low-frequency finding rather than dropped.
+Wilson score intervals are reported, not bare percentages, given the small failure counts involved
+(most proportions here are 0/n or n/n). Controller-driven's one reverse non-recovery (of 54) is
+reported honestly as a real, rare observation -- the control-plane log confirms the controller
+detected the fault and acted (forward direction recovered normally in that same repetition), so this
+is not attributable to the same harness-flake signature the two excluded fast-failover repetitions
+showed; it is not further explained here, kept as a disclosed, low-frequency finding rather than
+dropped.
 
 **Data-plane restoration time (ms), forward direction (the unified, construct-valid comparison).**
 
 | Mechanism | n | Median | IQR | 95% CI | Mean | SD |
 |---|---:|---:|---|---|---:|---:|
-| Autonomous agent | 3 | 265.73 | [254.40, 275.65] | [243.07, 285.57] | 264.79 | 21.26 |
+| Autonomous agent | 20 | 285.95 | [279.45, 295.18] | [280.15, 294.43] | 290.19 | 27.86 |
 | Controller-driven | 54 | 20.10 | [15.56, 20.58] | [15.87, 20.20] | 21.26 | 9.56 |
 | Fast-failover group | 39 | 15.89 | [15.59, 20.70] | [15.69, 20.54] | 19.60 | 6.87 |
 
@@ -85,7 +101,7 @@ as a disclosed, low-frequency finding rather than dropped.
 
 | Mechanism | n | Median | IQR | 95% CI | Mean | SD |
 |---|---:|---:|---|---|---:|---:|
-| Autonomous agent | 3 | 319.13 | [308.90, 331.53] | [298.67, 343.93] | 320.58 | 22.67 |
+| Autonomous agent | 20 | 339.56 | [328.41, 352.70] | [328.81, 350.50] | 346.11 | 32.45 |
 | Controller-driven | 53 | 20.10 | [15.49, 21.01] | [15.93, 20.48] | 20.09 | 6.07 |
 | Fast-failover group | -- | -- | -- | -- | never recovers | -- |
 
@@ -93,47 +109,48 @@ as a disclosed, low-frequency finding rather than dropped.
 
 | Comparison | Direction | n (a, b) | U | p-value | Significant |
 |---|---|---|---:|---:|:---:|
-| Agent vs. controller-driven | Forward | 3, 54 | 162.0 | 6.8e-05 | Yes |
-| Agent vs. fast-failover | Forward | 3, 39 | 117.0 | 1.7e-04 | Yes |
+| Agent vs. controller-driven | Forward | 20, 54 | 1080.0 | 5.1e-11 | Yes |
+| Agent vs. fast-failover | Forward | 20, 39 | 780.0 | 4.5e-10 | Yes |
 | Controller-driven vs. fast-failover | Forward | 54, 39 | 1061.5 | **0.950** | **No** |
-| Agent vs. controller-driven | Reverse | 3, 53 | 159.0 | 0.0040 | Yes |
+| Agent vs. controller-driven | Reverse | 20, 53 | 1060.0 | 5.8e-11 | Yes |
 
 **The agent is significantly slower than both baselines on the unified, construct-valid metric** --
-consistent with the earlier (construct-invalid) comparison's headline conclusion, now on solid
-methodological footing. **Controller-driven and fast-failover are statistically indistinguishable in
-forward-direction restoration speed** (p=0.95) -- a genuinely new, clean finding this unified metric
-reveals that the earlier comparison could not, since it never compared these two baselines to each
-other on the same construct.
+consistent with the earlier (n=3) result's headline conclusion, now on a materially more precise
+estimate (agent n=20, bootstrap CI half-width ~2.5% of the median). **Controller-driven and
+fast-failover show no statistically detectable difference in forward-direction restoration speed**
+(p=0.950) -- a genuinely new, clean finding this unified metric reveals that the earlier comparison
+could not, since it never compared these two baselines to each other on the same construct. This is
+reported as absence of evidence for a difference, not evidence of equivalence: no equivalence margin
+was pre-specified, so this study does not and cannot claim the two mechanisms perform identically.
 
 **Control-plane phase decomposition (ms), kept separate from the data-plane comparison above.**
 
 | Mechanism | Detection | BFS | Stage | Commit | Total control-plane |
 |---|---:|---:|---:|---:|---:|
-| Autonomous agent | ~5 (Section 7.1) | 0.011 | 301.39 | 104.84 | 406.23 |
+| Autonomous agent (n=20) | ~5 (Section 7.1) | 0.016 | 329.93 | 135.34 | 465.27 |
 | Controller-driven | ~15 (Table 8, Section 7.10) | N/A (hardcoded) | N/A | N/A | 2.53 |
 | Fast-failover group | N/A (no software control plane) | N/A | N/A | N/A | N/A |
 
-The agent's own control-plane total (406.23 ms mean) is HIGHER than its own measured data-plane
-restoration time (264.79 ms forward / 320.58 ms reverse mean) -- consistent with the two-phase
-protocol's own design: forwarding is genuinely restored once the relevant flows are staged, which can
-complete before `execute_repair()`'s own bookkeeping (including old-path withdrawal, counted in
-`commit`) finishes. This is not a contradiction, and is the same class of observation Section 7.7's
-own multi-OVS discussion already made about `repair_end_ns` not necessarily coinciding with the exact
-data-plane resumption instant -- now directly confirmed by an independent, real packet-level
-measurement rather than inferred.
+The agent's own control-plane total (465.27 ms mean, n=20) is HIGHER than its own measured
+data-plane restoration time (290.19 ms forward / 346.11 ms reverse mean) -- consistent with the
+two-phase protocol's own design: forwarding is genuinely restored once the relevant flows are
+staged, which can complete before `execute_repair()`'s own bookkeeping (including old-path
+withdrawal, counted in `commit`) finishes. This is not a contradiction, and is the same class of
+observation Section 7.7's own multi-OVS discussion already made about `repair_end_ns` not
+necessarily coinciding with the exact data-plane resumption instant -- now directly confirmed by an
+independent, real packet-level measurement rather than inferred.
 
 ## What this does and does not establish
 
 Establishes: a construct-valid, apples-to-apples comparison of real data-plane restoration time
-across all three mechanisms on the identical topology and fault; that the agent is significantly
-slower than both baselines (read, as before, as the cost of its own correctness machinery); that the
-two baselines are NOT significantly different from each other in forward-direction speed; and that
-fast-failover's reverse-direction non-recovery is a hard, structural 0% (39/39 attempts), not a rare
-event. Does not establish: agent statistics beyond n=3 (though its own coefficient of variation was
-low enough at pilot size to meet the target precision, a larger n would still strengthen the estimate
-given how consequential this comparison is); a resolution of why the agent's own control-plane total
-exceeds its data-plane restoration time (noted, not further decomposed here); or behaviour on any
-topology other than the diamond.
+across all three mechanisms on the identical topology and fault, with the agent's own distribution
+now backed by n=20 rather than a 3-observation pilot; that the agent is significantly slower than
+both baselines (read, as before, as the cost of its own correctness machinery); that this sample
+provides no evidence the two baselines differ from each other in forward-direction speed (not
+evidence they are equivalent); and that fast-failover's reverse-direction non-recovery is a hard,
+structural 0% (39/39 attempts, Wilson 95% CI 0.0-9.0%), not a rare event. Does not establish: a
+resolution of why the agent's own control-plane total exceeds its data-plane restoration time (noted,
+not further decomposed here); or behaviour on any topology other than the diamond.
 
 ## Files
 

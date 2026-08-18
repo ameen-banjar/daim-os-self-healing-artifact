@@ -201,6 +201,32 @@ uses them.
   — the two formal-baseline harnesses and their raw data from the v0.18.0
   experiments described below.
 
+## Agent unified-restoration replication extended to n=20, and final-review fixes (v0.22.0)
+
+A full external Q1-style review of the compressed manuscript (v0.20.0/v0.21.0-era text) found that
+while the agent's unified service-restoration pilot (n=3) satisfied the mean/CV-based replication
+formula used throughout this evidence set, this left the headline agent-vs-baseline comparison's own
+distribution represented by only three observations -- a deeper concern than that formula addresses,
+given the reported statistics are the median, its bootstrap CI, and the unpaired Mann-Whitney test
+rather than the mean. `network/stage3_service_restoration_unified.py` was re-run for 17 further agent
+repetitions under a predefined stopping rule matched to those estimators (continue until the
+bootstrap 95% CI on the median stabilises to a tight, consistent precision); it did, at n=20 (CI
+half-width ~2.5% of the median). All 17 additional repetitions recovered both directions cleanly.
+`analysis/paper3_service_restoration_statistics.py` was extended with Wilson score 95% confidence
+intervals for every recovery-rate proportion, since several are 0/n or n/n and a bare percentage
+understates the real uncertainty at these sample sizes.
+
+The same review also caught a genuine statistical-interpretation error: the controller-driven-vs-
+fast-failover forward-restoration comparison's non-significant result (Mann-Whitney U, p=0.950) had
+been described in the manuscript as the two mechanisms being "statistically indistinguishable" --
+correct informally, but a non-significant p-value is an absence of evidence for a difference, not
+evidence of equivalence, since no equivalence margin was pre-specified. Every occurrence in the
+manuscript and this repository's own reports was corrected to state the finding precisely.
+
+Full detail: `results/network/STAGE3_SERVICE_RESTORATION_UNIFIED_REPORT.md` (updated in place).
+
+No agent-logic changes this round; 33/33 existing unit tests still pass.
+
 ## Replicated hold-down window-length sensitivity (v0.21.0)
 
 The six `(window, schedule)` hold-down sensitivity combinations (v0.16.0) had each been measured

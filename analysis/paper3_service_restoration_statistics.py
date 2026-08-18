@@ -9,11 +9,15 @@ last-good-before-fault to first-good-after-fault, per direction), with each
 mechanism's own control-plane phase decomposition reported separately, not
 conflated into the comparison.
 
-Replication count per mechanism is the pilot-variability-derived value
-(Section 6.11's own established methodology, reapplied here): for each
-mechanism, the larger of its two directions' required n (since one live
-repetition yields both directions' data simultaneously, a single N must
-satisfy both).
+Replication count per mechanism: controller-driven and fast-failover use the
+pilot-variability-derived value from Section 6.11's methodology. The agent's
+n was extended from an initial n=3 (which satisfied that same mean/CV-based
+formula but left its own headline distribution represented by only three
+observations) to n=20, stopping once the bootstrap 95% CI on the median
+reached a tight, stable precision (~2.5% of the median) -- a predefined
+median-precision stopping rule better matched to the estimators actually
+reported (median/IQR/bootstrap-CI/Mann-Whitney) than the original
+mean-based formula.
 """
 import csv
 import json
@@ -64,6 +68,20 @@ def describe(name, data):
     return result
 
 
+def wilson_ci(successes, n, z=1.96):
+    """Wilson score 95% CI for a binomial proportion -- appropriate for small n
+    and edge proportions (0/n, n/n), unlike a normal-approximation interval."""
+    if n == 0:
+        return None, None
+    p = successes / n
+    denom = 1 + z**2 / n
+    centre = p + z**2 / (2 * n)
+    margin = z * ((p * (1 - p) / n + z**2 / (4 * n**2)) ** 0.5)
+    lo = (centre - margin) / denom
+    hi = (centre + margin) / denom
+    return round(max(0.0, lo), 4), round(min(1.0, hi), 4)
+
+
 def mann_whitney(name_a, data_a, name_b, data_b):
     stat, p = stats.mannwhitneyu(data_a, data_b, alternative="two-sided")
     print(f"Mann-Whitney U ({name_a} n={len(data_a)} vs {name_b} n={len(data_b)}): "
@@ -95,13 +113,22 @@ def main():
     for r in rows:
         by_mech.setdefault(r["mechanism"], []).append(r)
 
-    print("=== Recovery rates ===")
+    print("=== Recovery rates (with Wilson 95% CI) ===")
     recovery = {}
     for mech, rs in by_mech.items():
-        fwd_rate = sum(1 for r in rs if r["forward_recovered"] == "True") / len(rs)
-        rev_rate = sum(1 for r in rs if r["reverse_recovered"] == "True") / len(rs)
-        recovery[mech] = {"n": len(rs), "forward_recovery_rate": fwd_rate, "reverse_recovery_rate": rev_rate}
-        print(f"{mech}: n={len(rs)} forward_recovered={fwd_rate*100:.0f}% reverse_recovered={rev_rate*100:.0f}%")
+        n = len(rs)
+        fwd_successes = sum(1 for r in rs if r["forward_recovered"] == "True")
+        rev_successes = sum(1 for r in rs if r["reverse_recovered"] == "True")
+        fwd_rate = fwd_successes / n
+        rev_rate = rev_successes / n
+        fwd_ci = wilson_ci(fwd_successes, n)
+        rev_ci = wilson_ci(rev_successes, n)
+        recovery[mech] = {
+            "n": n, "forward_recovery_rate": fwd_rate, "forward_ci95": fwd_ci,
+            "reverse_recovery_rate": rev_rate, "reverse_ci95": rev_ci,
+        }
+        print(f"{mech}: n={n} forward_recovered={fwd_rate*100:.0f}% (Wilson 95% CI [{fwd_ci[0]*100:.1f}%,{fwd_ci[1]*100:.1f}%]) "
+              f"reverse_recovered={rev_rate*100:.0f}% (Wilson 95% CI [{rev_ci[0]*100:.1f}%,{rev_ci[1]*100:.1f}%])")
 
     print("\n=== Data-plane restoration time (ms), forward direction ===")
     forward_data = {mech: [float(r["forward_outage_ms"]) for r in rs if r["forward_outage_ms"]] for mech, rs in by_mech.items()}

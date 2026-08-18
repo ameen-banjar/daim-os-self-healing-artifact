@@ -294,8 +294,8 @@ def draw_topology(path):
 
     draw.text(
         (24, 858),
-        "4 switches, 5 links. This diamond is the topology for every Paper 3 network-level measurement\n"
-        "except the multi-OVS deployment (Figure 8), which uses a separate two-host topology.",
+        "4 switches, 5 links. Used for the single-host measurements; multi-OVS (Figure 8) splits it across\n"
+        "two OVS instances, and four further topologies (Figure 9) are also measured (Section 7.8).",
         fill="#333333", font=small,
     )
     image.save(path)
