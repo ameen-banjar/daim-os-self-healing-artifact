@@ -201,6 +201,38 @@ uses them.
   — the two formal-baseline harnesses and their raw data from the v0.18.0
   experiments described below.
 
+## Replicated hold-down window-length sensitivity (v0.21.0)
+
+The six `(window, schedule)` hold-down sensitivity combinations (v0.16.0) had each been measured
+once live -- a sensitivity exploration, not a statistically replicated dataset, and the last
+remaining piece of Section 10 item 1 still open after v0.16.0 closed the asymmetric-interface half.
+`network/stage3_holddown_sensitivity.py` was extended with `--reps`/`--start-rep` so each combination
+could be replicated to a precision-based N (`n_final =
+ceil((1.96*pilot_sd/(0.20*pilot_mean))^2)`, the same methodology used for every other replicated
+dataset in this evidence set), sized from a fresh 3-repetition pilot batch (18 live repetitions
+total, current code) collected specifically to measure that variability -- a single prior repetition
+per combination could not by itself support an N calculation. A `spurious_recovered_count` field was
+also added as a standing per-repetition regression check on the interface-vs-edge-keying (v0.3.0) and
+last-report-wins (v0.4.0) defect classes.
+
+**Result: every one of the six combinations already met its precision target at the 3-repetition
+pilot size.** Both the suppressed-transition count (CV 0-10% across combinations) and repair-action
+time (CV 0.5-8.0%) were well under the 20%-of-mean precision target, so `n_final` never exceeded 3 for
+any combination or metric -- not an arbitrarily small sample, the sample size the data's own
+variability calls for (`analysis/paper3_holddown_sensitivity_statistics.py`,
+`results/network/stage3_holddown_sensitivity_statistics.json`). Suppression count is deterministic or
+near-deterministic within every combination on replication (zero variance in 4 of 6, a 1-transition
+spread in the other 2, both short-window boundary-timing cases), confirming the original pilot's
+single readings were not one-off artifacts. **Zero spurious recoveries across all 18 repetitions** --
+the regression check found no recurrence of the earlier-fixed defect classes. The original n=1 pilot
+data is retained side-by-side as `stage3_holddown_sensitivity_raw_pre_replication_pilot.csv`/
+`..._events_pre_replication_pilot.jsonl`, not overwritten.
+
+Full detail: `results/network/STAGE3_HOLDDOWN_SENSITIVITY_ASYMMETRIC_REPORT.md` (extended in place).
+
+No agent-logic changes this round (a harness/analysis extension only, not a `daim_link_agent.py`
+change); 33/33 existing unit tests still pass.
+
 ## Unified service-restoration metric, correcting a construct-validity gap (v0.20.0)
 
 A reviewer identified a real construct-validity problem in v0.18.0/v0.19.0's own formal-baseline

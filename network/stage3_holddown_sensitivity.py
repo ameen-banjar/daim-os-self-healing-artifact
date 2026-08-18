@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Live-network hold-down window-length sensitivity sweep against workload
-burstiness (Section 8.2's disclosed gap: only a single 2.0s window and one
-seven-transition schedule had been measured live before this). Extends
-stage3_holddown_flapping.py's protocol (same DiamondTopo, same
-net.configLinkStatus("s1","s2",state) mechanism) across multiple
-(window_length, flap_schedule) combinations, one live repetition each --
-this is a sensitivity exploration, not the final statistical dataset (that
-is deferred, per plan, until pilot variability from this and the other
-Layer-2 items sets a real replication count).
+burstiness. Extends stage3_holddown_flapping.py's protocol (same
+DiamondTopo, same net.configLinkStatus("s1","s2",state) mechanism) across
+multiple (window_length, flap_schedule) combinations. Originally a single
+live repetition per combination (an exploratory pilot); this version adds
+`--reps`/`--start-rep` so each combination can be replicated to a
+precision-based N derived from that pilot's own variability, using the
+same `n_final = ceil((1.96*sd/(0.20*mean))^2)` methodology as the rest of
+this evidence set's replicated experiments (see
+paper3_service_restoration_statistics.py / STAGE3_FINAL_STATISTICS
+material). Rows now carry a `repetition` index and are appended, not
+overwritten, so a pilot batch and its extension batches accumulate in the
+same CSV.
 
 For each combination, the exact logic-level PREDICTION is computed by
 calling decide_link_event() directly (the same trusted, unit-tested pure
@@ -16,6 +20,7 @@ then compared against what the live run actually observed -- extending the
 established "logic-level prediction vs. live measurement" comparison
 stage3_holddown_flapping.py already uses for the single baseline case.
 """
+import argparse
 import json
 import os
 import select
@@ -190,10 +195,37 @@ def run_one(window_seconds, schedule_name, schedule):
             if e.get("event") in ACTION_FOR_EVENT
         ]
         predicted_actions = predict(schedule, window_seconds)
+
+        observed_recovered = observed_actions.count("recovered")
+        predicted_recovered = predicted_actions.count("recovered")
+        # A "spurious recovery" is an observed recovered-edge event beyond
+        # what the trusted logic-level prediction says should occur --
+        # exactly the class of defect stage3_holddown_flapping.py's
+        # cross-interface bug (round 2, v0.3.0) produced (3 spurious
+        # recoveries per run instead of 1). Tracked per-repetition here so
+        # a regression would show up as a nonzero rate across reps rather
+        # than requiring a fresh manual audit each time.
+        spurious_recovered = max(0, observed_recovered - predicted_recovered)
+
+        repair_events = [e for e in events if e.get("event") in
+                         ("repair_installed", "repair_installed_stale_withdraw")]
+        first_repair = repair_events[0] if repair_events else None
+        repair_action_us = (
+            (first_repair["repair_end_ns"] - first_repair["repair_start_ns"]) / 1000.0
+            if first_repair and "repair_start_ns" in first_repair and "repair_end_ns" in first_repair
+            else None
+        )
+        bfs_us = (
+            (first_repair["bfs_end_ns"] - first_repair["bfs_start_ns"]) / 1000.0
+            if first_repair and "bfs_start_ns" in first_repair and "bfs_end_ns" in first_repair
+            else None
+        )
+
         return {
             "window_seconds": window_seconds,
             "schedule": schedule_name,
             "schedule_transitions": len(schedule),
+            "processed_transitions": idx,
             "observed_action_sequence": ";".join(observed_actions),
             "predicted_action_sequence": ";".join(predicted_actions),
             "matches_prediction": observed_actions == predicted_actions,
@@ -201,6 +233,11 @@ def run_one(window_seconds, schedule_name, schedule):
             "predicted_suppressed_count": predicted_actions.count("suppressed"),
             "observed_repair_count": observed_actions.count("repair") + observed_actions.count("repair_failed"),
             "predicted_repair_count": predicted_actions.count("repair") + predicted_actions.count("repair_failed"),
+            "observed_recovered_count": observed_recovered,
+            "predicted_recovered_count": predicted_recovered,
+            "spurious_recovered_count": spurious_recovered,
+            "repair_action_us": repair_action_us,
+            "bfs_us": bfs_us,
         }, events
     finally:
         if agent and agent.poll() is None:
@@ -213,30 +250,56 @@ def run_one(window_seconds, schedule_name, schedule):
         subprocess.run(["mn", "-c"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+FIELDNAMES = [
+    "repetition", "window_seconds", "schedule", "schedule_transitions",
+    "processed_transitions", "observed_action_sequence", "predicted_action_sequence",
+    "matches_prediction", "observed_suppressed_count", "predicted_suppressed_count",
+    "observed_repair_count", "predicted_repair_count", "observed_recovered_count",
+    "predicted_recovered_count", "spurious_recovered_count", "repair_action_us", "bfs_us",
+]
+
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--window", type=float, default=None,
+                         help="restrict to one window length (default: all of WINDOW_LENGTHS)")
+    parser.add_argument("--schedule", choices=list(SCHEDULES), default=None,
+                         help="restrict to one schedule (default: all of SCHEDULES)")
+    parser.add_argument("--reps", type=int, default=1)
+    parser.add_argument("--start-rep", type=int, default=1)
+    args = parser.parse_args()
+
+    windows = [args.window] if args.window is not None else WINDOW_LENGTHS
+    schedules = {args.schedule: SCHEDULES[args.schedule]} if args.schedule else SCHEDULES
+
     setLogLevel("warning")
     rows = []
     all_events = []
-    for window_seconds in WINDOW_LENGTHS:
-        for schedule_name, schedule in SCHEDULES.items():
-            print(f"stage3-holddown-sensitivity window={window_seconds} schedule={schedule_name}", flush=True)
-            row, events = run_one(window_seconds, schedule_name, schedule)
-            print(json.dumps(row), flush=True)
-            rows.append(row)
-            all_events.append({"window_seconds": window_seconds, "schedule": schedule_name, "events": events})
+    for window_seconds in windows:
+        for schedule_name, schedule in schedules.items():
+            for rep in range(args.start_rep, args.start_rep + args.reps):
+                print(f"stage3-holddown-sensitivity rep={rep} window={window_seconds} schedule={schedule_name}", flush=True)
+                row, events = run_one(window_seconds, schedule_name, schedule)
+                row = {"repetition": rep, **row}
+                print(json.dumps(row), flush=True)
+                rows.append(row)
+                all_events.append({"repetition": rep, "window_seconds": window_seconds,
+                                    "schedule": schedule_name, "events": events})
 
     RAW.parent.mkdir(parents=True, exist_ok=True)
     import csv
-    with RAW.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
-        writer.writeheader()
+    write_header = not RAW.exists()
+    with RAW.open("a", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=FIELDNAMES)
+        if write_header:
+            writer.writeheader()
         writer.writerows(rows)
-    print(f"wrote {len(rows)} rows to {RAW}")
+    print(f"appended {len(rows)} rows to {RAW}")
 
-    with EVENTS_LOG.open("w") as handle:
+    with EVENTS_LOG.open("a") as handle:
         for rep in all_events:
             handle.write(json.dumps(rep) + "\n")
-    print(f"wrote full event logs to {EVENTS_LOG}")
+    print(f"appended event logs to {EVENTS_LOG}")
 
     matches = sum(1 for r in rows if r["matches_prediction"])
     print(f"combinations matching logic-level prediction: {matches}/{len(rows)}")
