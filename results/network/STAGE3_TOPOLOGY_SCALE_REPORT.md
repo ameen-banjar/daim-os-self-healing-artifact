@@ -10,8 +10,9 @@ no-network-needed BFS microbenchmark.
 
 Section 10's remaining "multiple topologies + scale + overhead" evidence-gate item. Every live
 experiment run so far in this evidence set (single-host, multi-OVS, hold-down flapping,
-asymmetric-interface, hold-down sensitivity) used one of two structurally IDENTICAL four-switch
-diamond graphs. This round runs the real, unmodified `daim_link_agent.py` -- via a new generic
+asymmetric-interface, hold-down sensitivity) used one of two structurally different four-switch
+topologies: the single-host diamond, or the separate multi-OVS remote-edge topology (primary path
+`s1-s3-s4`, alternate `s1-s3-s5-s4`). This round runs the real, unmodified `daim_link_agent.py` -- via a new generic
 topology generator (`topology_gen.py`), not a hand-built diamond -- against three structurally
 different topologies, one of them exceeding 200 switches (in a pure-logic microbenchmark) and one
 exceeding 10 switches live (closing the explicit scale target), while also measuring the agent
@@ -81,8 +82,12 @@ config into the real `bfs_path()`/topology-consistency checks before any live ru
 
 **10/10 repetitions matched their designed outcome exactly** (`recoverable_by_design` vs.
 `repair_succeeded`): the unrecoverable `linear_10` case correctly and safely produced
-`repair_failed` (no crash, no false-positive success, current_path left `None` per Section 5.2's
-existing failure-honesty contract) rather than either hanging or wrongly claiming success; every
+`repair_failed` (no crash, no false-positive success). A BFS no-path result returns before
+`execute_repair()` is ever called, so `current_path` is left unchanged at its old, now-broken value
+rather than set to `None` -- the `None`-on-failure contract belongs to `execute_repair()`'s own
+flow-installation-failure path (Section 5.2), a different branch from a BFS no-path result
+(Section 4.5). The periodic retry mechanism (Section 4.6) keeps recomputing BFS on every tick,
+reporting `repair_retry_no_path` for as long as the edge stays down. Every
 `ring_8`/`ring_20`/`fattree_k4` fault was correctly detected and repaired.
 
 **Repair-action time scales with hop count, not topology type**: `ring_8` (4 hops) and `fattree_k4`
@@ -129,11 +134,12 @@ across three independent metrics.
 Derived analytically from `path_to_flows()`'s own documented contract (2 OpenFlow flow-mod calls
 per traversed hop: one per direction), applied to the real hop counts each repetition's log actually
 reported -- not re-measured by a separate counting mechanism, since the contract itself is simple
-and already directly verifiable by code reading. `linear_10`'s failed repair still issues 2 x 9 = 18
-withdraw-only messages (the old path is torn down even though no new path is staged); `ring_8` and
+and already directly verifiable by code reading. `linear_10`'s failed repair issues 0 flow-mod
+messages: a BFS no-path result (Section 4.5) returns before `execute_repair()` is ever called, so no
+old-path withdrawal or new-path install is ever attempted; `ring_8` and
 `fattree_k4` (4 hops each) issue 16 total (8 withdraw + 8 install); `ring_20` (10 hops) issues 40 (20
-withdraw + 20 install) -- linear in hop count, as `path_to_flows()`'s per-hop loop guarantees by
-construction.
+withdraw + 20 install) -- linear in hop count for the recoverable topologies, as `path_to_flows()`'s
+per-hop loop guarantees by construction.
 
 ### What this does and does not establish
 
@@ -143,9 +149,11 @@ correct, safe handling of a genuinely unrecoverable topology; a live confirmatio
 reroute crosses a different core switch, not a trivial local detour; a real, live >10-switch (20)
 deployment; and that repair time, packet loss, CPU time, and flow-mod message count all scale
 primarily with REPAIR PATH LENGTH, not topology size or monitored-interface count. Does not
-establish: a statistically replicated dataset at each topology (n=1 for the necessarily-single-outcome
-`linear_10` case, n=3 for the others -- a preliminary exploration, consistent with this evidence
-set's existing convention of deferring the final replicated dataset to Layer 2's later step); formal
+establish: a large-sample statistical dataset at each topology (n=1 for the necessarily-single-outcome
+`linear_10` case, n=3 for the other three -- confirmed by the pilot-variability analysis, Section
+6.11 of the manuscript, to already meet this evidence set's 20%-of-mean precision target given
+their own low coefficient of variation, so this is the final dataset for these conditions, not a
+preliminary one); formal
 baseline comparison (fast-failover / controller-driven recovery on these same topologies, Section
 10's separate, still-open item); or topologies substantially larger than 20 switches (a natural
 future extension, not attempted here since 20 already exceeds the explicit >10 target).

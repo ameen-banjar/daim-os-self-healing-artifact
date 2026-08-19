@@ -268,7 +268,7 @@ def draw_sequence(path):
 # ------------------------------------------------------------- Figure 3 ----
 
 def draw_topology(path):
-    width, height = 1550, 950
+    width, height = 1550, 1010
     image = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(image)
     title_font = ImageFont.load_default(size=46)
@@ -298,8 +298,9 @@ def draw_topology(path):
 
     draw.text(
         (24, 858),
-        "4 switches, 5 links. Used for the single-host measurements; multi-OVS (Figure 8) splits it across\n"
-        "two OVS instances, and four further topologies (Figure 9) are also measured (Section 7.8).",
+        "4 switches, 5 links. Used for the single-host measurements; a separate multi-OVS\n"
+        "remote-edge topology (Figure 8) spans two OVS instances; four further topologies\n"
+        "(Figure 9) are also used (Section 7.8).",
         fill="#333333", font=small,
     )
     image.save(path)

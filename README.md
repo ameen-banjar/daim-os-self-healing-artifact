@@ -9,13 +9,14 @@ Paper 3 in the DAIM six-paper programme. (Retitled from an earlier, broader
 not read or write DAIM-OS core tables/signals directly — see the
 manuscript's Section 4.1 for the actual DAIM-OS integration boundary.)
 
-**Status: this artifact accompanies a prototype-stage, not-yet-submitted
+**Status: this artifact accompanies an evidence-complete, not-yet-submitted
 manuscript.** Per the author's plan, submission of Paper 3 is held until
 Papers 1 and 2 of this programme reach an editorial decision; this repository
 is published now so the code, data, and figures already produced are citable
 and reviewable in the meantime. See `Submission_Manuscript.md` in the paper
-directory of the main repository for the full, explicit evidence-gate plan
-(Section 10) of what is and is not yet measured.
+directory of the main repository, Section 10, for the remaining fault
+classes, topologies, and baselines that stay out of this paper's scope as
+future extensions.
 
 This repository contains only the code, raw data, logs, and figures cited by
 that paper. It is deliberately scoped to that single paper: the author's
@@ -200,6 +201,43 @@ uses them.
   `stage3_baseline_fast_failover_raw.csv`, `stage3_baseline_controller_driven_raw.csv`
   — the two formal-baseline harnesses and their raw data from the v0.18.0
   experiments described below.
+
+## Fourth-pass review: linear_10 flow-mod count, artifact/manuscript consistency, wording (v0.25.0)
+
+A fourth-pass review (Minor Revision, 9.1/10, confirming the round-3 verdict and confidence) found
+one genuine numeric error and several places where artifact prose or manuscript wording had not kept
+pace with the current code and each other -- none requiring new experiments.
+
+- **`linear_10`'s failed-repair flow-mod count was wrong (18, should be 0).** A BFS no-path result
+  (`decide_link_event()`'s `repair_failed` branch) returns before `execute_repair()` is ever called,
+  so no old-path withdrawal or new-path install is attempted -- confirmed directly against the code.
+  Fixed in `Submission_Manuscript.md` Section 7.8 and in
+  `results/network/STAGE3_TOPOLOGY_SCALE_REPORT.md`, which also still said `current_path` becomes
+  `None` on this path (it does not -- that contract belongs to `execute_repair()`'s own
+  flow-installation-failure branch, a different code path) and described the topology-scale n=3
+  dataset as a "preliminary exploration ... deferred to Layer 2's later step," which was true when
+  first written but is now the final dataset per the pilot-CV precision analysis.
+- Figure 3 (`paper3_topology.png`) still had baked-in caption text claiming the multi-OVS deployment
+  "splits this same topology across two OVS instances" -- inaccurate per Section 6.8's own topology
+  (primary `s1-s3-s4`, alternate `s1-s3-s5-s4`, not the single-host diamond); regenerated with an
+  accurate caption ("a separate multi-OVS remote-edge topology").
+- §5.2 overclaimed that "a partial installation failure never touches the old path's own flows" --
+  the boundary-hop entries sharing a match with the old path ARE modified during late staging (then
+  restored on rollback); reworded to state this precisely.
+- Removed "correctness-complete implementation" phrasing (5 occurrences) in favour of "current
+  evaluated implementation, including the correctness mechanisms of Section 5" -- the paper itself
+  discloses several still-open gaps (capacity feasibility, concurrent-writer safety), so
+  "-complete" overstated the claim.
+- Fixed two remaining "evidence-gate plan" references in the Introduction (Section 10 is now
+  Conclusion and Future Work, not an evidence-gate plan), scoped §6.11's replication-count sentence
+  to the conditions actually governed by the pilot-CV rule (the agent's n=20 unified-metric dataset is
+  the stated exception, per the round-3 fix), and softened the Discussion's "A genuinely new finding"
+  framing for the non-significant p=0.950 result to "A secondary comparative observation."
+- Synced the same fixes into this artifact repository's own `README.md` status header (was still
+  "prototype-stage", now "evidence-complete") and the main manuscript build script's docx metadata
+  (same fix).
+
+No agent-logic changes; 33/33 existing unit tests still pass.
 
 ## Holm-Bonferroni correction and third-pass manuscript fixes (v0.24.0)
 

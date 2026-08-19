@@ -1,15 +1,16 @@
 cff-version: 1.2.0
-message: "If you use this artifact, please cite it and the paper it accompanies once published. This artifact accompanies a prototype-stage manuscript that is not yet submitted (see README.md); cite with that context."
+message: "If you use this artifact, please cite it and the paper it accompanies once published. This artifact accompanies an evidence-complete manuscript that is not yet submitted (see README.md); cite with that context."
 title: "DAIM-OS Self-Healing Artifact: Event-Driven Link-Failure Recovery for a DAIM-OS Client Using OVSDB Notifications and Reactive Path Recomputation"
 type: software
 authors:
   - family-names: Banjar
     given-names: Ameen
     orcid: "https://orcid.org/0000-0002-0871-5153"
-version: 0.24.0
+version: 0.25.0
 date-released: 2026-08-19
 license: Apache-2.0
-doi: 10.5281/zenodo.22007356
+doi: TODO -- fetch from Zenodo after gh release create
+# v0.24.0 DOI: 10.5281/zenodo.22007356.
 # v0.23.0 DOI: 10.5281/zenodo.22003649.
 # v0.22.0 DOI: 10.5281/zenodo.22003418.
 # v0.21.0 DOI: 10.5281/zenodo.21990712.
@@ -33,7 +34,7 @@ repository-code: "https://github.com/ameen-banjar/daim-os-self-healing-artifact"
 abstract: >-
   Reproducibility artifact for "Event-Driven Link-Failure Recovery for a
   DAIM-OS Client Using OVSDB Notifications and Reactive Path Recomputation"
-  (Paper 3 in the DAIM six-paper programme, prototype-stage, not yet
+  (Paper 3 in the DAIM six-paper programme, evidence-complete, not yet
   submitted). Contains an event-driven repair agent (daim_link_agent.py)
   that subscribes to real OVSDB Interface.link_state notifications,
   recomputes an alternate path with breadth-first search over a declared
