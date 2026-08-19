@@ -13,11 +13,17 @@ Replication count per mechanism: controller-driven and fast-failover use the
 pilot-variability-derived value from Section 6.11's methodology. The agent's
 n was extended from an initial n=3 (which satisfied that same mean/CV-based
 formula but left its own headline distribution represented by only three
-observations) to n=20, stopping once the bootstrap 95% CI on the median
-reached a tight, stable precision (~2.5% of the median) -- a predefined
-median-precision stopping rule better matched to the estimators actually
-reported (median/IQR/bootstrap-CI/Mann-Whitney) than the original
-mean-based formula.
+observations) pragmatically, in a further batch of 17 repetitions (no
+numeric target was fixed in advance for this specific extension), then
+re-examined: at the resulting n=20, the bootstrap 95% CI on the median is
+approximately 2.5% of the median -- tight and stable compared to the
+wider, less certain estimate n=3 supported.
+
+The four Mann-Whitney significance tests (three forward-direction pairwise
+comparisons, one reverse-direction comparison) are also reported with
+Holm-Bonferroni-adjusted p-values, correcting for testing the same family
+of hypotheses four times; the adjustment does not change which comparisons
+are significant at alpha=0.05 in this dataset.
 """
 import csv
 import json
@@ -80,6 +86,21 @@ def wilson_ci(successes, n, z=1.96):
     lo = (centre - margin) / denom
     hi = (centre + margin) / denom
     return round(max(0.0, lo), 4), round(min(1.0, hi), 4)
+
+
+def holm_bonferroni(pvalues):
+    """Holm-Bonferroni step-down adjustment for a family of m hypothesis
+    tests. Returns adjusted p-values in the same order as the input,
+    monotonically non-decreasing in rank and capped at 1.0."""
+    m = len(pvalues)
+    order = sorted(range(m), key=lambda i: pvalues[i])
+    adjusted = [0.0] * m
+    running_max = 0.0
+    for rank, idx in enumerate(order):
+        adj = min((m - rank) * pvalues[idx], 1.0)
+        running_max = max(running_max, adj)
+        adjusted[idx] = running_max
+    return adjusted
 
 
 def mann_whitney(name_a, data_a, name_b, data_b):
@@ -163,6 +184,14 @@ def main():
     print("\n=== Unpaired significance tests, reverse-direction data-plane restoration (agent vs controller only; fast_failover never recovers) ===")
     if "agent" in reverse_data and "controller_driven" in reverse_data:
         tests.append(mann_whitney("agent", reverse_data["agent"], "controller_driven", reverse_data["controller_driven"]))
+
+    print("\n=== Holm-Bonferroni correction across all four tests (one family) ===")
+    holm_adjusted = holm_bonferroni([t["p_value"] for t in tests])
+    for t, p_holm in zip(tests, holm_adjusted):
+        t["p_value_holm"] = round(p_holm, 6)
+        t["significant_at_0.05_holm"] = bool(p_holm < 0.05)
+        print(f"{t['a']} vs {t['b']}: p={t['p_value']:.4g} -> Holm-adjusted p={p_holm:.4g} "
+              f"({'significant' if p_holm < 0.05 else 'NOT significant'})")
 
     output = {
         "recovery_rates": recovery,

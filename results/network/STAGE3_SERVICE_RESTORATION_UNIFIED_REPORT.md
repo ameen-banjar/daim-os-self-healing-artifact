@@ -106,14 +106,17 @@ dropped.
 | Controller-driven | 53 | 20.10 | [15.49, 21.01] | [15.93, 20.48] | 20.09 | 6.07 |
 | Fast-failover group | -- | -- | -- | -- | never recovers | -- |
 
-**Unpaired significance tests (Mann-Whitney U -- no genuinely matched-pairs design exists).**
+**Unpaired significance tests (Mann-Whitney U -- no genuinely matched-pairs design exists), with
+Holm-Bonferroni-adjusted p-values correcting for testing this four-comparison family together.**
 
-| Comparison | Direction | n (a, b) | U | p-value | Significant |
-|---|---|---|---:|---:|:---:|
-| Agent vs. controller-driven | Forward | 20, 54 | 1080.0 | 5.1e-11 | Yes |
-| Agent vs. fast-failover | Forward | 20, 39 | 780.0 | 4.5e-10 | Yes |
-| Controller-driven vs. fast-failover | Forward | 54, 39 | 1061.5 | **0.950** | **No** |
-| Agent vs. controller-driven | Reverse | 20, 53 | 1060.0 | 5.8e-11 | Yes |
+| Comparison | Direction | n (a, b) | U | p-value | Holm-adjusted p | Significant |
+|---|---|---|---:|---:|---:|:---:|
+| Agent vs. controller-driven | Forward | 20, 54 | 1080.0 | 5.1e-11 | 2.1e-10 | Yes |
+| Agent vs. fast-failover | Forward | 20, 39 | 780.0 | 4.5e-10 | 8.9e-10 | Yes |
+| Controller-driven vs. fast-failover | Forward | 54, 39 | 1061.5 | **0.950** | **0.950** | **No** |
+| Agent vs. controller-driven | Reverse | 20, 53 | 1060.0 | 5.8e-11 | 2.1e-10 | Yes |
+
+The Holm correction does not change which comparisons are significant at alpha=0.05.
 
 **The agent is significantly slower than both baselines on the unified, construct-valid metric** --
 consistent with the earlier (n=3) result's headline conclusion, now on a materially more precise

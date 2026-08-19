@@ -201,6 +201,20 @@ uses them.
   — the two formal-baseline harnesses and their raw data from the v0.18.0
   experiments described below.
 
+## Holm-Bonferroni correction and third-pass manuscript fixes (v0.24.0)
+
+A third-pass review (accepting all v0.23.0 fixes and moving the editorial decision from Major to
+Minor Revision) requested a multiple-comparison correction for the four Mann-Whitney tests in the
+unified service-restoration comparison, plus several manuscript-only precision fixes. Added
+`holm_bonferroni()` to `analysis/paper3_service_restoration_statistics.py` and applied it to all four
+tests as one family; the correction does not change which comparisons are significant at alpha=0.05
+(the three already-significant comparisons remain significant after adjustment, and the one
+non-significant comparison, controller-driven vs. fast-failover at p=0.950, remains non-significant).
+Results updated in `results/network/STAGE3_SERVICE_RESTORATION_UNIFIED_REPORT.md` and
+`stage3_service_restoration_statistics.json`.
+
+No agent-logic changes; 33/33 existing unit tests still pass.
+
 ## Second-pass final-review fixes: Figure 2, claim scoping, stopping-rule honesty (v0.23.0)
 
 A follow-up review of the v0.22.0 manuscript (accepting the n=20 extension and Wilson CIs as

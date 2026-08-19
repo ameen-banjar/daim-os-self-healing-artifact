@@ -132,7 +132,9 @@
       "n_b": 54,
       "u_statistic": 1080.0,
       "p_value": 5.148230551756628e-11,
-      "significant_at_0.05": true
+      "significant_at_0.05": true,
+      "p_value_holm": 0.0,
+      "significant_at_0.05_holm": true
     },
     {
       "a": "agent",
@@ -141,7 +143,9 @@
       "n_b": 39,
       "u_statistic": 780.0,
       "p_value": 4.4606595815783883e-10,
-      "significant_at_0.05": true
+      "significant_at_0.05": true,
+      "p_value_holm": 0.0,
+      "significant_at_0.05_holm": true
     },
     {
       "a": "controller_driven",
@@ -150,7 +154,9 @@
       "n_b": 39,
       "u_statistic": 1061.5,
       "p_value": 0.9503352281568552,
-      "significant_at_0.05": false
+      "significant_at_0.05": false,
+      "p_value_holm": 0.950335,
+      "significant_at_0.05_holm": false
     },
     {
       "a": "agent",
@@ -159,7 +165,9 @@
       "n_b": 53,
       "u_statistic": 1060.0,
       "p_value": 5.782923264585451e-11,
-      "significant_at_0.05": true
+      "significant_at_0.05": true,
+      "p_value_holm": 0.0,
+      "significant_at_0.05_holm": true
     }
   ]
 }
