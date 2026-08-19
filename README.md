@@ -202,6 +202,39 @@ uses them.
   — the two formal-baseline harnesses and their raw data from the v0.18.0
   experiments described below.
 
+## Fifth-pass review: exclusion-criterion wording, AI/figures disclosure, final polish (v0.26.0)
+
+A fifth-pass, final pre-submission review (Minor Revision, 9.2/10) found no further scientific gaps
+and requested only text-level fixes, none requiring new experiments, baselines, replication, or
+topologies.
+
+- Table 7's note on the fast-failover exclusion said the two excluded attempts were identified under
+  a "predefined technical-failure criterion" -- inaccurate, since the criterion (both probe-direction
+  captures completely empty) was diagnosed after observing the anomaly, then checked against a clean
+  15-repetition follow-up, not fixed in advance. Reworded in `Submission_Manuscript.md` Section 7.10
+  and its Table 7 note to describe the actual sequence honestly.
+- Generative AI Declaration and Section 6.14: clarified that this manuscript's explanatory figures
+  and data visualizations (Figures 1-9) are produced by archived, deterministic Python scripts
+  (`paper3_analysis.py`) from author-specified layouts or measured data -- Claude assisted with
+  drafting/debugging that plotting code but did not generate, select, or alter any image content or
+  data point independently. Per Elsevier's generative-AI disclosure policy, the model/version should
+  be named where determinable; since this work spans many sessions over several weeks without a
+  reliable record of which Claude model/version ran in each one, the declaration now states this
+  explicitly ("model/version varied across sessions and was not consistently recorded") rather than
+  asserting an unverified single version.
+- Introduction: the "each replicated to a precision-based sample size" claim covering all five
+  topology conditions wrongly implied `linear_10` (n=1 by construction, deliberately unrecoverable)
+  was replicated like the other four; scoped to the recoverable topology conditions.
+- Section 5.1: "loop-freedom" clarified to "computed-path loop-freedom" -- BFS guarantees the
+  computed path itself is simple, not a formal guarantee against transient forwarding loops during a
+  multi-switch update.
+- Section 7.10: softened a causal claim ("an honest, expected consequence of the ... correctness
+  work") to state the timing increase coincides with the Section 5 correctness mechanisms without
+  claiming isolated causal attribution, consistent with the Discussion's already-correct hedging.
+- Discussion: "What was proven" retitled "What was demonstrated" -- no formal proof is claimed.
+
+No agent-logic changes; 33/33 existing unit tests still pass.
+
 ## Fourth-pass review: linear_10 flow-mod count, artifact/manuscript consistency, wording (v0.25.0)
 
 A fourth-pass review (Minor Revision, 9.1/10, confirming the round-3 verdict and confidence) found
